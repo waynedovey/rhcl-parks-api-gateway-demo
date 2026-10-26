@@ -1,0 +1,24 @@
+# Optional JWT endpoint alongside the original API-key route.
+# It inherits the hostname of parks-gw's existing listener.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: parks-jwt
+  namespace: rhcl-parks-demo
+spec:
+  parentRefs:
+    - name: parks-gw
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /jwt
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+      backendRefs:
+        - name: parks-api
+          port: 8080
