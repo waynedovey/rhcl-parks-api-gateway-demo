@@ -1,0 +1,27 @@
+# Technology Preview — deploy only after validating RHCL policies and APIProduct CRDs.
+# This product refers to the existing Parks HTTPRoute, not the OpenShift Route.
+apiVersion: devportal.kuadrant.io/v1alpha1
+kind: APIProduct
+metadata:
+  name: national-parks-api
+  namespace: rhcl-parks-demo
+spec:
+  displayName: "National Parks API"
+  description: "Sample Parks API secured and rate-limited by Red Hat Connectivity Link."
+  version: "1.0.0"
+  approvalMode: manual
+  publishStatus: Published
+  tags:
+    - demo
+    - national-parks
+    - rhcl
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: parks-api
+  documentation:
+    openAPISpecURL: "https://raw.githubusercontent.com/waynedovey/rhcl-parks-api-gateway-demo/main/docs/openapi.yaml"
+    docsURL: "https://github.com/waynedovey/rhcl-parks-api-gateway-demo/blob/main/docs/API-Products-and-API-Keys.md"
+    gitRepository: "https://github.com/waynedovey/rhcl-parks-api-gateway-demo"
+  contact:
+    team: "Parks API Lab"
