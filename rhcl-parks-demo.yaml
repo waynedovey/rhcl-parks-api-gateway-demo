@@ -1,0 +1,278 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rhcl-parks-demo
+  labels:
+    app.kubernetes.io/part-of: rhcl-parks-demo
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: parks-api-code
+  namespace: rhcl-parks-demo
+data:
+  server.py: |
+    import json
+    import os
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qs, urlsplit
+
+    PARKS = [
+        {"name": "Royal National Park", "state": "NSW", "lat": -34.14, "lon": 151.06},
+        {"name": "Blue Mountains National Park", "state": "NSW", "lat": -33.72, "lon": 150.31},
+        {"name": "Kakadu National Park", "state": "NT", "lat": -12.85, "lon": 132.87},
+        {"name": "Uluru-Kata Tjuta National Park", "state": "NT", "lat": -25.31, "lon": 131.04},
+    ]
+
+    class Handler(BaseHTTPRequestHandler):
+        def reply(self, status, payload):
+            content = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(content)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(content)
+
+        def do_GET(self):
+            parsed = urlsplit(self.path)
+            path = parsed.path
+            query = parse_qs(parsed.query)
+            if path == "/health":
+                self.reply(200, {"status": "ok"})
+            elif path in ("/", "/ws/info/"):
+                self.reply(200, {
+                    "id": "nationalparks", "displayName": "National Parks API (RHCL demo)",
+                    "endpoints": ["/ws/info/", "/ws/data/all", "/ws/data/park?name=Kakadu"]
+                })
+            elif path == "/ws/data/all":
+                self.reply(200, {"count": len(PARKS), "parks": PARKS})
+            elif path == "/ws/data/park":
+                name = query.get("name", [""])[0].strip()
+                if not name:
+                    self.reply(400, {"error": "name query parameter is required"})
+                    return
+                matches = [p for p in PARKS if name.casefold() in p["name"].casefold()]
+                if not matches:
+                    self.reply(404, {"error": "park not found", "name": name})
+                    return
+                self.reply(200, {"parks": matches})
+            else:
+                self.reply(404, {"error": "endpoint not found", "path": path})
+
+    if __name__ == "__main__":
+        port = int(os.getenv("PORT", "8080"))
+        ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parks-api
+  namespace: rhcl-parks-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: parks-api
+  template:
+    metadata:
+      labels:
+        app: parks-api
+    spec:
+      containers:
+        - name: api
+          image: registry.access.redhat.com/ubi9/python-312:latest
+          command: ["python3.12", "-u", "/opt/app-root/src/server.py"]
+          env:
+            - name: PORT
+              value: "8080"
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: code
+              mountPath: /opt/app-root/src/server.py
+              subPath: server.py
+              readOnly: true
+      volumes:
+        - name: code
+          configMap:
+            name: parks-api-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: parks-api
+  namespace: rhcl-parks-demo
+spec:
+  selector:
+    app: parks-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: parks-gw
+  namespace: rhcl-parks-demo
+  labels:
+    kuadrant.io/gateway: "true"
+spec:
+  gatewayClassName: openshift-default
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      hostname: parks-api.example.test
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: parks-api
+  namespace: rhcl-parks-demo
+spec:
+  parentRefs:
+    - name: parks-gw
+  hostnames:
+    - parks-api.example.test
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: parks-api
+          port: 8080
+---
+# DEMO-ONLY secrets. Use generated client credentials or OIDC in production.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: parks-key-alice
+  namespace: rhcl-parks-demo
+  labels:
+    app: parks-api
+    authorino.kuadrant.io/managed-by: authorino
+  annotations:
+    secret.kuadrant.io/user-id: alice
+type: Opaque
+stringData:
+  api_key: alice-parks-demo-key
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: parks-key-bob
+  namespace: rhcl-parks-demo
+  labels:
+    app: parks-api
+    authorino.kuadrant.io/managed-by: authorino
+  annotations:
+    secret.kuadrant.io/user-id: bob
+type: Opaque
+stringData:
+  api_key: bob-parks-demo-key
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: parks-key-benchmark
+  namespace: rhcl-parks-demo
+  labels:
+    app: parks-api
+    authorino.kuadrant.io/managed-by: authorino
+  annotations:
+    secret.kuadrant.io/user-id: benchmark
+type: Opaque
+stringData:
+  api_key: benchmark-parks-demo-key
+---
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: parks-auth
+  namespace: rhcl-parks-demo
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: parks-api
+  defaults:
+    rules:
+      authentication:
+        api-key-users:
+          apiKey:
+            selector:
+              matchLabels:
+                app: parks-api
+          credentials:
+            authorizationHeader:
+              prefix: APIKEY
+      response:
+        success:
+          filters:
+            identity:
+              json:
+                properties:
+                  userid:
+                    selector: 'auth.identity.metadata.annotations.secret\.kuadrant\.io/user-id'
+---
+apiVersion: kuadrant.io/v1
+kind: RateLimitPolicy
+metadata:
+  name: parks-rate-limits
+  namespace: rhcl-parks-demo
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: parks-api
+  limits:
+    alice:
+      rates:
+        - limit: 5
+          window: 10s
+        - limit: 15
+          window: 1m
+      counters:
+        - expression: auth.identity.userid
+      when:
+        - predicate: "auth.identity.userid == 'alice'"
+    bob:
+      rates:
+        - limit: 2
+          window: 10s
+        - limit: 6
+          window: 1m
+      counters:
+        - expression: auth.identity.userid
+      when:
+        - predicate: "auth.identity.userid == 'bob'"
+    benchmark:
+      rates:
+        - limit: 10000
+          window: 10s
+        - limit: 100000
+          window: 1m
+      counters:
+        - expression: auth.identity.userid
+      when:
+        - predicate: "auth.identity.userid == 'benchmark'"
