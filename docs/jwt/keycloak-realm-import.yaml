@@ -1,0 +1,42 @@
+# OPTIONAL: Red Hat build of Keycloak / Keycloak Operator realm import.
+# Requires a Keycloak CR named parks-keycloak in namespace keycloak.
+# Create Secret keycloak/parks-client-secret with data key 'secret' BEFORE applying.
+# The operator imports a new realm only; it does not reconcile edits to an existing one.
+apiVersion: k8s.keycloak.org/v2beta1
+kind: KeycloakRealmImport
+metadata:
+  name: parks-realm-import
+  namespace: keycloak
+spec:
+  keycloakCRName: parks-keycloak
+  placeholders:
+    PARKS_CLIENT_SECRET:
+      secret:
+        name: parks-client-secret
+        key: secret
+  realm:
+    realm: parks
+    enabled: true
+    displayName: National Parks Demo
+    accessTokenLifespan: 300
+    bruteForceProtected: true
+    clients:
+      - clientId: parks-demo-cli
+        name: Parks API machine client
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        clientAuthenticatorType: client-secret
+        serviceAccountsEnabled: true
+        standardFlowEnabled: false
+        directAccessGrantsEnabled: false
+        secret: ${PARKS_CLIENT_SECRET}
+        protocolMappers:
+          - name: parks-api-audience
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            consentRequired: false
+            config:
+              included.custom.audience: parks-api
+              access.token.claim: "true"
+              id.token.claim: "false"
