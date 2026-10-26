@@ -8,6 +8,26 @@ This is the **only README**. Run commands from the repository root unless stated
 
 **If you cloned this repo before the documentation update:** Check `git status --short` first. If you have no local changes, refresh your clone once with `git fetch origin` followed by `git merge --ff-only origin/main`. Keep any personal changes rather than overwriting them. The GitHub README may be newer than your Mac's local copy.
 
+## Run the complete test automatically
+
+After deployment (Sections 1–2), start here instead of pasting every `curl` command:
+
+```bash
+bash scripts/test-all.sh
+```
+
+The runner is **read-only for Kubernetes resources**: it checks Gateway/HTTPRoute and policy status, exercises HTTP `200/400/401/404/429`, checks API Product publication and APIKey approval, requests a Keycloak JWT, checks JWT `200/401/429` and expiry, and measures latency with **20 harmless requests**. It prompts (with hidden input) for an **approved consumer API key** and the current **Keycloak client secret** when needed. It **never prints tokens or secrets**.
+
+- **Full run (~3–4 minutes):** `bash scripts/test-all.sh` — includes 65-second rate-counter reset and up to 125-second JWT-expiry check.
+- **Fast retest:** `bash scripts/test-all.sh --quick` — skips the sustained-window and token-expiry waits.
+- **Noninteractive diagnostics:** `bash scripts/test-all.sh --quick --non-interactive` — skips credential-dependent tests unless the approved key/client secret have already been supplied by environment variables.
+- **Skip latency probes:** add `--no-perf`.
+- **TLS:** the default uses `curl -k` for this lab's untrusted Route certificate. Use `VERIFY_TLS=1 bash scripts/test-all.sh` when your certificates are trusted.
+
+It prints one **PASS / FAIL / SKIP** line per check and a final count; exits nonzero when checks fail. **SKIP is not a PASS.** Importantly, if `parks-plans` overrides `parks-rate-limits`, it reports the policy issue and **skips** the original Alice/Bob quota tests; it **does not delete or change `parks-plans`**. Read Section 4 if you want to test those quotas.
+
+**External WAF/DDoS and actual OpenTelemetry trace correlation** are explicitly `SKIP` because the repository doesn't provision these integrations. The known malformed-JWT `504` test is deliberately omitted.
+
 ## Tick-the-box demo checklist
 
 - [ ] **Gateway:** Route → Gateway → Parks API; Gateway `Programmed=True`.
@@ -543,6 +563,7 @@ If you also created `rhcl-parks-consumer`, review its contents before separately
 | [rhcl-parks-demo.yaml](rhcl-parks-demo.yaml) | Parks app, Gateway, API-key Secrets, AuthPolicy and RateLimitPolicy |
 | [scripts/expose-route.sh](scripts/expose-route.sh) | Create HTTPS Route and align Gateway/HTTPRoute hostnames |
 | [scripts/check-policies.sh](scripts/check-policies.sh) | Read-only policy and component diagnostics |
+| [scripts/test-all.sh](scripts/test-all.sh) | One-command, read-only PASS/FAIL/SKIP validation runner |
 | [scripts/setup-jwt-demo.sh](scripts/setup-jwt-demo.sh) | Add lab Keycloak, JWT HTTPRoute and policies |
 | [docs/keycloak-lab.yaml](docs/keycloak-lab.yaml), [docs/keycloak-realm.json](docs/keycloak-realm.json) | Keycloak deployment and sample realm |
 | [docs/jwt-protection-template.yaml](docs/jwt-protection-template.yaml) | JWT AuthPolicy and rate-limit configuration |
