@@ -138,6 +138,7 @@ spec:
     - name: http
       protocol: HTTP
       port: 80
+      # Initial placeholder: scripts/expose-route.sh updates to the OpenShift Route host.
       hostname: parks-api.example.test
       allowedRoutes:
         namespaces:
@@ -151,6 +152,7 @@ metadata:
 spec:
   parentRefs:
     - name: parks-gw
+  # Must match the OpenShift Route hostname after running scripts/expose-route.sh.
   hostnames:
     - parks-api.example.test
   rules:
