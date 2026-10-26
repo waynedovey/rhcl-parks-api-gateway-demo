@@ -11,7 +11,7 @@ This optional extension adds a **JWT-secured endpoint** to the existing RHCL Par
 | JWT token management | Keycloak realm and OAuth2 `client_credentials` client; short-lived access tokens | Keycloak issues a signed token valid for 120 seconds |
 | JWT signature and expiry validation | Authorino verifies the JWT against Keycloak JWKS | Invalid, tampered, expired or missing token → 401 |
 | Issuer validation | Kuadrant checks the signed `iss` claim equals the public Keycloak realm URL | Wrong issuer → 403 (authorization denial) |
-| Audience validation | AuthPolicy requires `aud: parks-api` | Wrong audience → 401 |
+| Audience validation | AuthPolicy authorization rule requires `aud` to include `parks-api` | Wrong audience → 403 |
 | Valid authenticated API request | Existing Parks app under a dedicated `/jwt` path | 200 |
 | Client-specific throttling | JWT `sub` forwarded to Limitador; 5/10s and 20/min per client | 429 when limits are exceeded |
 | Aggregate throttling | Global 60/min for JWT API route | 429 above shared allowance |
@@ -74,7 +74,7 @@ The script:
 2. Creates a random Keycloak bootstrap administrator password in the Kubernetes Secret `parks-keycloak-bootstrap` (never stored in GitHub).
 3. Imports the `parks` realm with a confidential `parks-demo-client` service account client, 120-second access tokens and custom audience `parks-api`.
 4. Starts Red Hat build of Keycloak in **development mode**, creates its HTTPS OpenShift Route, sets its public issuer hostname and waits for its Deployment.
-5. Adds an HTTPRoute for `/jwt`, an `AuthPolicy` that validates signed bearer tokens, and a `RateLimitPolicy`.
+5. Adds an HTTPRoute for `/jwt`, an `AuthPolicy` that validates signed bearer tokens (including issuer and audience authorization rules), and a `RateLimitPolicy`.
 
 Rerunning the script reuses the existing bootstrap Secret/Route and updates the lab configuration. **Important:** this is a single-node Keycloak development installation with an in-memory database. If the pod restarts, clients or secrets may be recreated and existing tokens stop working. This is an intentionally disposable lab, **not** a supported production topology.
 
@@ -121,22 +121,28 @@ read -rs KC_CLIENT_SECRET
 echo
 ```
 
-The `client_id` is `parks-demo-client`. Do not store the client secret, JWT or bootstrap password in Git.
+The `client_id` is `parks-demo-client`. **The Keycloak bootstrap admin password is NOT the OAuth client secret.** Use **Clients → parks-demo-client → Credentials → Client secret**. If Keycloak was restarted in development mode, recheck the client secret because its in-memory database might have been recreated. Do not store the client secret, JWT or bootstrap password in Git.
 
 ## 4. Obtain and inspect a JWT
 
 Ask Keycloak for an access token using the OAuth2 client credentials flow:
 
 ```bash
-TOKEN_JSON="$(curl -ksS --fail-with-body -X POST \
+TOKEN_JSON="$(curl -ksS -X POST \
   "$KC_URL/realms/parks/protocol/openid-connect/token" \
   -d grant_type=client_credentials \
   -d client_id=parks-demo-client \
   --data-urlencode "client_secret=$KC_CLIENT_SECRET")"
 
 ACCESS_TOKEN="$(printf '%s' "$TOKEN_JSON" | jq -r '.access_token // empty')"
+
+if [[ -z "$ACCESS_TOKEN" ]]; then
+  printf '%s\n' "$TOKEN_JSON" | jq '{error, error_description}'
+  echo "Token issuance failed. Recheck the parks-demo-client Credentials tab."
+else
+  echo "Access token received; it is stored only in your current shell."
+fi
 unset KC_CLIENT_SECRET TOKEN_JSON
-test -n "$ACCESS_TOKEN" || { echo 'Token issuance failed'; exit 1; }
 ```
 
 `curl -k` is only for this sandbox's untrusted route certificate. Install trusted certificates for real deployments; `-k` disables server identity verification.
@@ -156,7 +162,7 @@ Verify:
 - `exp` is approximately 120 seconds after `iat`.
 - `sub` identifies the Keycloak service-account identity.
 
-**Never trust decoded claims alone.** Authorino verifies the cryptographic signature against Keycloak's current signing keys, confirms expiration and the configured audience; a separate authorization rule checks the issuer.
+**Never trust decoded claims alone.** Authorino verifies the cryptographic signature against Keycloak's current signing keys and confirms expiration. In this RHCL 1.4.3 environment, **separate authorization rules** check both the issuer and audience. A wrong signed audience or issuer returns **403**, while missing/invalid/expired signatures return **401**. The cluster silently pruned `jwt.audiences` in an earlier manifest, so the policy explicitly uses `patternMatching` with `operator: incl` for the JWT's `aud` array.
 
 ## 5. Demonstrate the status codes
 
@@ -219,12 +225,12 @@ Wait longer than two minutes after token issuance and repeat a valid-token call.
 | Layer | Check | Component |
 | --- | --- | --- |
 | TLS client → router | HTTPS transport | OpenShift Router (edge TLS) |
-| Authentication | Presence, signature, Keycloak signing key (`kid`), expiration, `aud=parks-api` | RHCL AuthPolicy → Authorino |
-| Authorization | Exact JWT `iss` matches expected Keycloak realm | RHCL AuthPolicy → Authorino |
+| Authentication | Presence, signature, Keycloak signing key (`kid`), expiration | RHCL AuthPolicy → Authorino |
+| Authorization | Exact JWT `iss` and `aud` including `parks-api` | RHCL AuthPolicy → Authorino |
 | Traffic control | 5/10s + 20/min per JWT `sub`; 60/min aggregate | RHCL RateLimitPolicy → Limitador |
 | Backend | Parks REST endpoint and application response | Parks API |
 
-For a production setup, prefer `jwt.issuerUrl` pointing at a trusted HTTPS Keycloak realm with an appropriately trusted CA. This sandbox deliberately uses the **in-cluster HTTP JWKS URL** to work around its untrusted public Route certificate and explicitly checks the public issuer. Protect that back-channel with network policies and TLS/mTLS in a real deployment.
+For a production setup, prefer `jwt.issuerUrl` pointing at a trusted HTTPS Keycloak realm with an appropriately trusted CA; verify audience validation as an additional authorization rule or as a field supported by your installed Authorino CRD. This sandbox deliberately uses the **in-cluster HTTP JWKS URL** to work around its untrusted public Route certificate and explicitly checks the public issuer. Protect that back-channel with network policies and TLS/mTLS in a real deployment.
 
 ### Token lifecycle and management
 
@@ -256,11 +262,11 @@ The GitHub YAML deploys **only** the RHCL policies and lab Keycloak. **No AWS WA
 | `AuthPolicy` or `RateLimitPolicy` says `MissingDependency` | `oc get kuadrant -A`, `oc get authorino,limitador -A`; complete RHCL installation first |
 | `ImagePullBackOff` on Keycloak | Entitlement/pull secret access to `registry.redhat.io` |
 | Keycloak pod not Ready | `oc -n rhcl-parks-demo logs deploy/parks-keycloak`; confirm the realm import and `KC_HOSTNAME` |
-| Keycloak token endpoint `400` / `401` | Use `parks` realm, correct client secret; check service accounts enabled |
+| Keycloak token endpoint `400` / `401` | Inspect `{error,error_description}`; `invalid_client` usually means wrong/blank client secret or client ID. Use **Clients → parks-demo-client → Credentials**, not bootstrap admin password. Confirm service accounts enabled. |
 | Missing `parks-api` audience | Check Clients → Client scopes/mappers or imported client `parks-api-audience`; fetch a fresh token |
 | JWT route `404` | `oc -n rhcl-parks-demo get httproute parks-jwt -o yaml`; confirm Gateway listener host and existing Parks Route |
 | Correct JWT gets `401` | Check `aud`, signature, expiration, Keycloak JWKS reachability and Authorino logs |
-| Correct JWT gets `403` | Compare `iss` with `https://<keycloak-route-host>/realms/parks` exactly |
+| Correct JWT gets `403` | Compare `iss` with `https://<keycloak-route-host>/realms/parks`, and check that `aud` is an array containing `parks-api` |
 | Missing token still gets `200` | **Stop.** Policies are not enforced / route bypasses Gateway |
 | No `429` | Check rate limit `Enforced=True` and identity filter `auth.identity.userid` |
 | Router TLS certificate error | `-k` for this lab only; use a trusted certificate for production |
@@ -276,6 +282,31 @@ oc get authorino,limitador -A
 ```
 
 **Portal note:** This extension is a distinct JWT-protected `HTTPRoute`. It does **not automatically publish** a second API Product or issue API keys. If you want an OIDC product in the developer portal later, publish `parks-jwt` separately. For API Products in RHCL 1.4, the `AuthPolicy` should expose the JWT authentication rule under `spec.rules.authentication` so the discovery controller can find it.
+
+
+### A common repair: `parks-auth` already has `spec.rules`
+
+If reapplying `rhcl-parks-demo.yaml` prints:
+
+```text
+The AuthPolicy "parks-auth" is invalid: spec: Invalid value: Implicit and explicit defaults are mutually exclusive
+```
+
+an older manifest attempted to add `spec.defaults.rules` to a policy already using `spec.rules`. The corrected manifest uses **only `spec.rules`**. After `git pull`, first inspect the current policy:
+
+```bash
+oc -n rhcl-parks-demo get authpolicy parks-auth -o yaml
+```
+
+If the current policy has **both** `spec.rules` and `spec.defaults`, remove only the conflicting defaults (keep existing rules and credentials):
+
+```bash
+oc -n rhcl-parks-demo patch authpolicy parks-auth --type=json -p='[{"op":"remove","path":"/spec/defaults"}]'
+oc apply -f rhcl-parks-demo.yaml
+bash scripts/expose-route.sh
+```
+
+The `oc patch` removes the redundant policy subtree, **not the API-key Secrets**. You can confirm `Accepted=True` and `Enforced=True` before continuing.
 
 ## Files
 
