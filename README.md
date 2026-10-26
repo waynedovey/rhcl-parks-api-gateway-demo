@@ -1,65 +1,61 @@
-# Red Hat Connectivity Link — National Parks API Gateway Demo
+# RHCL National Parks API Gateway Demo
 
-Demonstrate API gateway capabilities using **RHCL 1.4.3** on **OpenShift 4.22.18** and a small, self-contained Parks API.
+One copy/paste lab for **Red Hat Connectivity Link (RHCL) 1.4.3** on **OpenShift 4.22.18**. It exposes a small Parks-themed REST API through an **OpenShift HTTPS Route**, then demonstrates API-key authentication, HTTP status codes, per-client rate limits, API Products/API Keys, and JWT validation using Red Hat build of Keycloak.
 
-**Use an OpenShift HTTPS Route**: no local port-forwarding or custom DNS records needed to run the gateway demos.
+This is the **only README**. Run commands from the repository root unless stated otherwise. The app is a self-contained Python REST API with four Australian parks, **not** the original Parksmap UI/MongoDB application.
 
-## What this lab demonstrates
+## Tick-the-box demo checklist
 
-| Requirement | Demo | Expected result |
-| --- | --- | --- |
-| HTTP status codes | Valid request, missing parameter, missing API key, unknown park | 200, 400, 401, 404 |
-| Per-client burst limits | Bob: 2 requests per 10s; Alice: 5 per 10s | 429 after allowance |
-| Per-client sustained limits | Bob: 6/min; Alice: 15/min | 429 after allowance |
-| OTel tracing | Optional observability stack setup | Trace gateway/policy requests (not preconfigured) |
-| Performance | Benchmark the HTTPS Route | p50/p95/p99; extra baseline steps in advanced guide |
-| WAF integration | Optional upstream WAF | WAF block + RHCL 401/429 (not preconfigured) |
-| JWT token validation | RHBK Keycloak client credentials, signature/issuer/audience checks | 200 valid; 401 missing/invalid/expired |
-| JWT quotas | Per-service-account and aggregate rate limits | 429 on policy breach |
-| DDoS defense in depth | AWS WAF/Shield + origin/network restrictions | Architecture guidance; AWS protections not provisioned |
+- [ ] **Gateway:** Route → Gateway → Parks API; Gateway `Programmed=True`.
+- [ ] **Policies:** `parks-auth` and `parks-rate-limits` show `Accepted=True` **and** `Enforced=True`.
+- [ ] **HTTP status:** `200` valid key, `400` missing parameter, `401` missing key, `404` unknown park.
+- [ ] **Burst:** Bob `429` after 2 requests/10s; Alice `429` after 5 requests/10s.
+- [ ] **Sustained:** Alice `429` on the 16th request in a minute.
+- [ ] **API Product/Keys (Tech Preview):** Publish product → request key → manually approve → call API.
+- [ ] **Keycloak:** OAuth2 client-credentials flow issues a 120-second signed JWT.
+- [ ] **JWT:** Valid token `200`, missing/expired token `401`; JWT policies `Accepted=True`/`Enforced=True`.
+- [ ] **JWT rate limits:** More than 5 calls/10s per authenticated subject → `429`.
+- [ ] **Performance (optional):** Capture route p50/p95/p99 and throughput.
+- [ ] **Tracing (optional):** Configure collector/back end separately and inspect spans.
+- [ ] **WAF/DDoS (optional):** Validate an external WAF test rule and prevent bypass.
 
-## Architecture
+**Important:** This repo deploys the gateway policies and (optionally) disposable lab Keycloak. It does **not** install a tracing stack, WAF, AWS Shield, or volumetric DDoS protection.
 
-```text
-Client --HTTPS--> OpenShift Route (edge TLS)
-                    |
-                    v
-              Gateway Service
-              parks-gw-openshift-default
-                    |
-                    v
-              Gateway + HTTPRoute
-              (RHCL AuthPolicy / RateLimitPolicy)
-                    |
-                    v
-                parks-api Service
-                    |
-                    v
-                Parks API Pod
-```
+## 1. Check OpenShift and RHCL prerequisites
 
-**Important:** The Route must point to the **Gateway Service**, not directly to `parks-api`. Sending traffic straight to the application would bypass RHCL policy enforcement.
-
-This is a small Parks-themed API with `/ws/info/` and `/ws/data/all` endpoints; it does not require MongoDB or include the original Parksmap UI.
-
-## 1. Check prerequisites
+Requirements: logged-in `oc`, `curl`, permissions to create lab namespace/routing/policies. Optional JWT setup needs `openssl`, `sed`, `jq` and Red Hat registry image access. Token decoding commands below use macOS `base64 -D`.
 
 ```bash
 oc whoami
 oc get clusterversion
-oc get csv -A | grep rhcl-operator
+oc -n openshift-operators get csv
+oc get gatewayclass openshift-default
 oc get kuadrant -A
 oc get authorino,limitador -A
-oc get gatewayclass openshift-default
 ```
 
-You need:
+For the verified environment, `rhcl-operator.v1.4.3` and related CSVs are `Succeeded`, `openshift-default` GatewayClass is `Accepted=True`, and a **Ready Kuadrant instance** has Authorino and Limitador components. **Installing the RHCL Operator is not sufficient on its own.**
 
-- A working OpenShift cluster and `oc` login.
-- The RHCL Operator **and a Ready `Kuadrant` instance** with Authorino and Limitador. The Operator alone is insufficient.
-- OpenShift's native `openshift-default` GatewayClass, with `Accepted=True`.
+If `openshift-default` does not exist, a cluster administrator can create the native class:
 
-**Missing Kuadrant?** Create it in the **same namespace where the RHCL Operator is installed**. On Wayne's cluster that namespace is **`openshift-operators`** (verify using `oc get deployments -A | grep kuadrant-operator`). In the console: **Ecosystem → Installed Operators → Red Hat Connectivity Link → Kuadrant → Create Kuadrant**. Or use:
+```bash
+oc apply -f - <<'EOF'
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: openshift-default
+spec:
+  controllerName: openshift.io/gateway-controller/v1
+EOF
+```
+
+If `oc get kuadrant -A` returns **No resources found**, first locate the Kuadrant Operator:
+
+```bash
+oc get deployments -A | grep kuadrant-operator-controller-manager
+```
+
+On this lab cluster its namespace is `openshift-operators` (replace the namespace below if yours differs). You can also use **Ecosystem → Installed Operators → Red Hat Connectivity Link → Kuadrant → Create Kuadrant**.
 
 ```bash
 oc -n openshift-operators apply -f - <<'EOF'
@@ -74,108 +70,278 @@ oc -n openshift-operators wait kuadrant/kuadrant \
   --for=condition=Ready=True --timeout=300s
 ```
 
-Replace `openshift-operators` if your Operator lives in another namespace. If the policies still say `MissingDependency` after creating Kuadrant and the native GatewayClass is ready, restart the discovered Operator Deployment using `oc -n openshift-operators rollout restart deployment/kuadrant-operator-controller-manager`. Reuse a healthy existing Kuadrant instance—do not create duplicates.
-
-**Missing GatewayClass?** An administrator can enable OpenShift's built-in controller:
+**Reuse an existing healthy Kuadrant instance.** If policies still report `MissingDependency` *after* Kuadrant and GatewayClass are ready, check the Operator deployment and consider a controller restart, accounting for other consumers:
 
 ```bash
-oc apply -f - <<'EOF'
-apiVersion: gateway.networking.k8s.io/v1
-kind: GatewayClass
-metadata:
-  name: openshift-default
-spec:
-  controllerName: openshift.io/gateway-controller/v1
-EOF
+oc -n openshift-operators rollout restart deployment/kuadrant-operator-controller-manager
+oc -n openshift-operators rollout status deployment/kuadrant-operator-controller-manager --timeout=180s
 ```
 
-## 2. Deploy the sample API and RHCL policies
+## 2. Install Parks and expose the HTTPS Route
 
-Clone the repository, then:
+If this is a fresh machine:
+
+```bash
+git clone https://github.com/waynedovey/rhcl-parks-api-gateway-demo.git
+cd rhcl-parks-api-gateway-demo
+```
+
+If you are already inside the repository, start at `oc apply`:
 
 ```bash
 oc apply -f rhcl-parks-demo.yaml
 oc -n rhcl-parks-demo rollout status deployment/parks-api --timeout=180s
-oc -n rhcl-parks-demo get gateway,httproute,pods,svc,authpolicy,ratelimitpolicy
-```
+oc -n rhcl-parks-demo get gateway,httproute,pods,svc
 
-The gateway should reach `Programmed=True`. The native Gateway controller generates a Service called `parks-gw-openshift-default` in this OpenShift 4.22 setup.
-
-**Already have a `parks-auth` policy?** If apply reports `Implicit and explicit defaults are mutually exclusive`, the old manifest is colliding with your existing `spec.rules`. This repository now uses only `spec.rules`. See the [safe targeted repair](docs/JWT-Keycloak-and-DDoS.md#a-common-repair-parks-auth-already-has-specrules).
-
-## 3. Create the HTTPS Route
-
-Run **after** the Gateway is created:
-
-```bash
 bash scripts/expose-route.sh
+bash scripts/check-policies.sh
 ```
 
-The script:
+The helper creates an edge-TLS OpenShift Route to the **Gateway Service `parks-gw-openshift-default:80`** and aligns Gateway/HTTPRoute hostnames. **Do not route to `parks-api` directly**, which would bypass RHCL policies. The Gateway Service is `parks-gw-openshift-default`, **not** `parks-gw`. No port forwarding is needed for the public demo.
 
-1. Creates an edge-TLS OpenShift Route pointing at `parks-gw-openshift-default:80`.
-2. Reads the Route's assigned `apps.` hostname.
-3. Updates the Gateway listener and HTTPRoute hostnames to match it, avoiding an Envoy `404`.
-4. Prints the final HTTPS URL.
-
-The command is safe to rerun; **rerun it after every `oc apply -f rhcl-parks-demo.yaml`**, because that file contains the original placeholder hostname.
-
-Get the URL:
+**Every time you reapply `rhcl-parks-demo.yaml`, rerun `bash scripts/expose-route.sh`** to reset the Gateway/HTTPRoute placeholder hostname.
 
 ```bash
 export PARKS_URL="https://$(oc -n rhcl-parks-demo get route parks-api-gateway -o jsonpath='{.spec.host}')"
 echo "$PARKS_URL"
-oc -n rhcl-parks-demo get route parks-api-gateway
-```
-
-**TLS note:** The commands below intentionally use `curl -k` (equivalent to `--insecure`) because this lab's OpenShift Route currently presents a certificate that your Mac does not trust. This bypasses server-certificate verification: **use it only for this controlled demo**, never in production. For proper verification, install a trusted Route certificate or use `curl --cacert /path/to/ca.pem` with your cluster CA. See [curl's TLS documentation](https://curl.se/docs/sslcerts.html).
-
-**Check RHCL policy readiness before treating the endpoint as protected:**
-
-```bash
 oc -n rhcl-parks-demo describe authpolicy parks-auth
 oc -n rhcl-parks-demo describe ratelimitpolicy parks-rate-limits
 ```
 
-Both policies should show `Accepted=True` and `Enforced=True`. If `oc get kuadrant -A` reports no resources, the policy demo will **not** work just because the Route serves traffic.
+**Both policies must have `Accepted=True` and `Enforced=True` before testing security.** A `200` alone proves only routing, not authentication.
 
-## 4. Demo HTTP status codes
+> **Lab TLS:** All `curl` examples use `-k` because this sandbox Route certificate is untrusted by the Mac. `-k` skips server verification; **do not use it in production**. Use a trusted certificate or `curl --cacert`. See [curl TLS certificate guidance](https://curl.se/docs/sslcerts.html).
+
+## 3. HTTP codes: 200, 400, 401, 404
 
 ```bash
-# 200 — list parks
-curl -k -i -H 'Authorization: APIKEY alice-parks-demo-key' "$PARKS_URL/ws/data/all"
+# 200 — valid API key / all parks
+curl -k -i -H 'Authorization: APIKEY alice-parks-demo-key' \
+  "$PARKS_URL/ws/data/all"
 
-# 400 — required name query parameter is missing
-curl -k -i -H 'Authorization: APIKEY alice-parks-demo-key' "$PARKS_URL/ws/data/park"
+# 400 — required name parameter missing
+curl -k -i -H 'Authorization: APIKEY alice-parks-demo-key' \
+  "$PARKS_URL/ws/data/park"
 
-# 401 — no API key; requires enforced AuthPolicy
+# 401 — no API key (Authorino rejection)
 curl -k -i "$PARKS_URL/ws/info/"
 
-# 404 — park not found
-curl -k -i -H 'Authorization: APIKEY alice-parks-demo-key' "$PARKS_URL/ws/data/park?name=Atlantis"
+# 404 — unknown park
+curl -k -i -H 'Authorization: APIKEY alice-parks-demo-key' \
+  "$PARKS_URL/ws/data/park?name=Atlantis"
 ```
 
-The `400` and `404` are application responses forwarded by the gateway. The `401` is generated by the authentication layer when the policy is enforced.
+`400` and `404` originate in the sample application and pass through the gateway; `401` comes from RHCL authorization. The API keys in the YAML are **public demo-only** strings.
 
-## 5. Demo per-client rate limiting (HTTP 429)
+## 4. Per-client burst and sustained limits: HTTP 429
 
-Bob allows **2 requests per 10 seconds** and **6 per minute**. Run eight requests immediately:
+| Client | Per 10 seconds | Per minute |
+| --- | ---: | ---: |
+| Alice | 5 | 15 |
+| Bob | 2 | 6 |
+| Benchmark | 10,000 | 100,000 |
+
+**Bob:** with fresh limits expect **2×200, then 6×429**.
 
 ```bash
 for i in {1..8}; do
-  curl -k -s -o /dev/null -w "Request $i: %{http_code}\n" \
+  curl -k -sS -o /dev/null -w "Bob $i: HTTP %{http_code}\n" \
     -H 'Authorization: APIKEY bob-parks-demo-key' \
     "$PARKS_URL/ws/data/all"
 done
 ```
 
-With fresh counters and working policies, expect two `200` responses followed by `429` responses. Alice has separate limits of **5/10s** and **15/min**. Allow at least a minute between repeat demonstrations.
+**Alice:** with fresh limits expect **5×200, then 3×429**.
 
-See the [advanced guide](RHCL-Parks-Demo-Guide.md#5-demonstrate-per-client-burst-and-sustained-limits) for an explicit sustained-window test.
+```bash
+for i in {1..8}; do
+  curl -k -sS -o /dev/null -w "Alice $i: HTTP %{http_code}\n" \
+    -H 'Authorization: APIKEY alice-parks-demo-key' \
+    "$PARKS_URL/ws/data/all"
+done
+```
 
-## 6. Demo latency
+**Sustained Alice (15/minute):** wait ~65 seconds for previous counters, send three batches separated by 11 seconds, then a 16th request in the 1-minute window:
 
-With `hey` installed, benchmark through the same Route:
+```bash
+for batch in 1 2 3; do
+  for i in {1..5}; do
+    curl -k -sS -o /dev/null -w '%{http_code} ' \
+      -H 'Authorization: APIKEY alice-parks-demo-key' \
+      "$PARKS_URL/ws/info/"
+  done
+  echo
+  sleep 11
+done
+curl -k -i -H 'Authorization: APIKEY alice-parks-demo-key' \
+  "$PARKS_URL/ws/info/"
+```
+
+Expected final `429`, assuming counters were fresh. These are **short + sustained windows**, not a token-bucket implementation.
+
+## 5. API Products & API Keys (Technology Preview)
+
+This optional module demonstrates **publishing an API → consumer request → owner approval → approved credential**. RHCL 1.4 API management is **Technology Preview**; publishing does not itself secure a route.
+
+### 5A. Enable the OpenShift console plugin
+
+```bash
+oc api-resources --api-group=devportal.kuadrant.io
+oc get console.operator.openshift.io cluster -o jsonpath='{.spec.plugins}{"\n"}'
+oc -n openshift-operators get deployment kuadrant-console-plugin
+```
+
+Expect CRDs named `APIProduct`, `APIKey`, `APIKeyRequest` and `APIKeyApproval`. If nothing appears in the console, go to **Administration → Cluster Settings → Configuration → Console → Console plugins**, enable **`kuadrant-console-plugin`**, and reload the browser. The menus are **Connectivity Link → API Products** and **Connectivity Link API Catalog → My API Keys / API Key Approvals**. The Operator/CRDs and console plugin must be healthy first.
+
+### 5B. Publish the National Parks API
+
+```bash
+oc explain apiproduct.spec --api-version=devportal.kuadrant.io/v1alpha1
+oc apply --dry-run=server -f docs/api-product.yaml
+oc apply -f docs/api-product.yaml
+oc -n rhcl-parks-demo get apiproduct national-parks-api -o yaml
+```
+
+The Product `National Parks API v1.0.0` targets **HTTPRoute `rhcl-parks-demo/parks-api`**, uses [OpenAPI spec](docs/openapi.yaml), and requires **manual key approval**. If your Tech Preview CRD rejects a field, read the dry-run message and `oc explain`; don't force a CRD change.
+
+### 5C. Request, approve, test and revoke a key
+
+1. If necessary, create a consumer namespace: `oc create namespace rhcl-parks-consumer` (skip if it already exists).
+2. Select namespace **`rhcl-parks-consumer`** in OpenShift Console → **Connectivity Link API Catalog → My API Keys → Request API Key** → choose **National Parks API** → key name `parks-consumer-demo` → submit. Expected **Pending**.
+3. Switch to **`rhcl-parks-demo`** → **API Key Approvals** → inspect and **Approve**.
+4. Switch back to `rhcl-parks-consumer` → **My API Keys** → open the approved key → **Show API Key**.
+
+Observe request/approval objects without exposing credentials:
+
+```bash
+oc -n rhcl-parks-demo get apikeyrequests,apikeyapprovals
+oc -n rhcl-parks-consumer get apikeys
+```
+
+Copy the newly approved credential to your terminal without putting its value in shell history:
+
+```bash
+read -r -s -p 'Approved Parks API key: ' PARKS_API_KEY
+echo
+curl -k -i -H "Authorization: APIKEY $PARKS_API_KEY" \
+  "$PARKS_URL/ws/data/all"
+unset PARKS_API_KEY
+```
+
+**Expected 200 requires the actual generated Secret to be discoverable by `parks-auth`**, including its namespace, `app: parks-api` label and the `APIKEY` prefix. If it returns `401`, inspect the managed Secret's **metadata**, not its value; API Product approval does not automatically fix the data-plane policy. Revoke the approved key in the console, then confirm denial.
+
+Separate-team RBAC can use the documented `api-catalog-browser`, `api-consumer` and `api-owner` roles; a cluster-admin demo does **not** prove tenant separation. The repo includes **no PlanPolicy/subscription tiers**; consumer keys do not automatically receive Bob/Alice quotas.
+
+## 6. JWT validation with Red Hat build of Keycloak
+
+This adds a second secure path **`/jwt/ws/data/all`** on the **same Gateway**. The original **`/ws/data/all`** still accepts the example API keys. A dedicated HTTPRoute rewrites `/jwt` to the same backend endpoint. Keycloak runs on its own Route and issues JWT access tokens.
+
+### 6A. Deploy Keycloak and JWT policies
+
+```bash
+bash scripts/setup-jwt-demo.sh
+oc -n rhcl-parks-demo rollout status deployment/parks-keycloak --timeout=300s
+oc -n rhcl-parks-demo describe authpolicy parks-jwt-auth
+oc -n rhcl-parks-demo describe ratelimitpolicy parks-jwt-rate-limits
+```
+
+**Stop** unless *both* JWT policies show `Accepted=True` and `Enforced=True`. This deploys [Keycloak](docs/keycloak-lab.yaml), [realm/client configuration](docs/keycloak-realm.json) and [JWT policy](docs/jwt-protection-template.yaml). Keycloak `start-dev` is ephemeral and **not HA/production-ready**. The script generates a bootstrap admin Kubernetes Secret; no passwords are in Git.
+
+### 6B. Obtain the OAuth client secret
+
+```bash
+export KC_URL="https://$(oc -n rhcl-parks-demo get route parks-keycloak -o jsonpath='{.spec.host}')"
+export PARKS_URL="https://$(oc -n rhcl-parks-demo get route parks-api-gateway -o jsonpath='{.spec.host}')"
+echo "$KC_URL"
+
+# macOS: get the lab admin password locally for the Keycloak console
+oc -n rhcl-parks-demo get secret parks-keycloak-bootstrap \
+  -o jsonpath='{.data.password}' | base64 -D
+echo
+```
+
+Open `$KC_URL`, log in as **admin**, select the **parks** realm, then **Clients → parks-demo-client → Credentials → Client secret**. **Client secret ≠ admin password.**
+
+In a terminal, paste the client secret without displaying it:
+
+```bash
+read -rs KC_CLIENT_SECRET
+# Paste secret, press Enter; input is not echoed.
+echo
+test -n "$KC_CLIENT_SECRET" && echo 'Client secret captured'
+```
+
+### 6C. Request a signed token (120-second lifetime)
+
+```bash
+TOKEN_JSON="$(curl -ksS -X POST \
+  "$KC_URL/realms/parks/protocol/openid-connect/token" \
+  -d grant_type=client_credentials \
+  -d client_id=parks-demo-client \
+  --data-urlencode "client_secret=$KC_CLIENT_SECRET")"
+
+printf '%s\n' "$TOKEN_JSON" | jq '{error, error_description, expires_in, token_type}'
+ACCESS_TOKEN="$(printf '%s' "$TOKEN_JSON" | jq -r '.access_token // empty')"
+unset KC_CLIENT_SECRET TOKEN_JSON
+test -n "$ACCESS_TOKEN" && echo 'JWT received'
+```
+
+Expected: no error, `token_type: "Bearer"`, `expires_in: 120`. If token issuance fails, the `parks-demo-client` secret or service-account configuration may be wrong. **Do not paste the JWT or client secret into tickets/GitHub/chat.**
+
+Optional: decode *selected claims* for display (decoding is **not validation**):
+
+```bash
+printf '%s' "$ACCESS_TOKEN" | cut -d. -f2 | tr '_-' '/+' \
+  | awk '{ while (length($0) % 4) $0 = $0 "="; print }' \
+  | base64 -D | jq '{iss, aud, sub, iat, exp}'
+```
+
+Check `iss` matches `$KC_URL/realms/parks`, `aud` includes `parks-api` and `exp - iat` is about 120 seconds. **Authorino**, not a local decode, verifies JWT signature and expiration against Keycloak JWKS. The AuthPolicy separately checks issuer and audience: RHCL 1.4.3 silently dropped an earlier `jwt.audiences` field, so these claims are validated using explicit authorization rules.
+
+### 6D. Prove 200, 401 and 429
+
+Run as soon as a **fresh token** is obtained:
+
+```bash
+# 200: valid JWT
+curl -k -i -H "Authorization: Bearer $ACCESS_TOKEN" \
+  "$PARKS_URL/jwt/ws/data/all"
+
+# 401: missing JWT
+curl -k -i "$PARKS_URL/jwt/ws/data/all"
+
+# 401: wrong authorization scheme
+curl -k -i -H 'Authorization: APIKEY alice-parks-demo-key' \
+  "$PARKS_URL/jwt/ws/data/all"
+
+# 429: per-subject quota is 5 requests/10 seconds
+for i in {1..8}; do
+  curl -k -sS -o /dev/null -w "JWT $i: HTTP %{http_code}\n" \
+    -H "Authorization: Bearer $ACCESS_TOKEN" \
+    "$PARKS_URL/jwt/ws/data/all"
+done
+
+# Original API-key path still works separately
+curl -k -i -H 'Authorization: APIKEY alice-parks-demo-key' \
+  "$PARKS_URL/ws/data/all"
+```
+
+JWT limits: **5/10s per `sub`**, **20/min per `sub`**, **60/min aggregate**. Prior calls can consume quota, so the eight rapid responses may contain fewer than five initial `200`. After 120 seconds, the old token should yield `401`; **issue a new token for another 429 test**.
+
+### 6E. What Keycloak/RHCL validates and manages
+
+- **Issue/renew:** Keycloak handles OAuth2 `client_credentials`; RHCL does not mint JWTs. Service accounts request new access tokens when they expire.
+- **Authentication:** Authorino validates signed JWTs using a cached Keycloak JWKS, signing key identifier (`kid`), signature and expiry.
+- **Authorization:** Explicit AuthPolicy rules require the Keycloak Route **issuer** and `parks-api` **audience** (wrong signed claims are rejected, typically `403`).
+- **Rate limits:** Limitador groups by authenticated JWT `sub` and enforces a shared aggregate cap.
+- **Rotation/revocation:** Rotate OAuth client secrets and Keycloak signing keys in Keycloak. Disabling a client does **not guarantee immediate revocation** of a previously issued stateless JWT; short TTL limits exposure.
+- **Production caveat:** Lab JWKS URL uses **in-cluster HTTP** because public Route TLS was untrusted; production needs trusted HTTPS/mTLS and network restrictions. The lab Keycloak uses development-mode ephemeral storage.
+
+**Known RHCL 1.4.3 defect:** On this cluster, the header `Authorization: Bearer invalid.invalid.invalid` led to **HTTP 504**, despite Authorino rejecting it. The gateway's `kuadrant_wasm_shim` panicked on a CEL parse error. **Do not use that malformed value as the normal `401` test or claim it passed security validation.** Use the demonstrated missing/expired-token cases. Collect proxy and Authorino logs and open a Red Hat support case for this malformed-token behavior.
+
+## 7. Optional performance measurement
+
+With a trusted Route certificate and the `hey` HTTP load-testing tool:
 
 ```bash
 hey -n 1000 -c 10 \
@@ -183,102 +349,131 @@ hey -n 1000 -c 10 \
   "$PARKS_URL/ws/data/all"
 ```
 
-The benchmark key has a high allowance so that `429` doesn't skew the results. Record requests/sec, p50, p95 and p99.
+Record requests/second, errors, p50/p95/p99. The benchmark identity has a deliberately high quota. **`hey` does not use `curl -k`**: fix certificate trust or configure your benchmarking tool's TLS settings explicitly for lab testing.
 
-The Route adds an OpenShift HAProxy ingress hop and TLS termination, so this is **end-to-end Route performance**, not an isolated RHCL overhead measurement. **Note:** the `hey` benchmark does not use curl flags; if its TLS verification fails, configure the benchmark tool to trust the Route certificate before measuring. The [advanced guide](RHCL-Parks-Demo-Guide.md#6-demonstrate-latency) explains an optional backend baseline.
+For a *rough* backend baseline, open a second terminal with:
 
-## 7. Optional OTel tracing and WAF
+```bash
+oc -n rhcl-parks-demo port-forward svc/parks-api 18081:8080
+```
 
-- **OpenTelemetry:** requires a deployed collector/tracing backend and separately configured supported tracing integration. The base manifest does not deliver end-to-end traces automatically.
-- **WAF:** requires an external product and policy (for example Cloudflare, F5 or AWS WAF). A WAF in front of the Route must also prevent bypass through the automatically created AWS Gateway LoadBalancer.
+Then benchmark `http://127.0.0.1:18081/ws/data/all`. **Caveat:** the two paths have different TLS and network hops; this comparison is **not an isolated measure of RHCL overhead**. For customer SLAs, compare equivalent paths and loads.
 
-See the [advanced guide](RHCL-Parks-Demo-Guide.md#7-opentelemetry-tracing--required-setup-not-included-in-the-base-manifest) for the configuration prerequisites and [WAF checks](RHCL-Parks-Demo-Guide.md#8-waf-integration--external-dependency).
+## 8. Optional tracing and WAF / DDoS protection
 
-## 8. API Products and API Keys (Technology Preview)
+### OpenTelemetry
 
-Publish the existing Parks `HTTPRoute` as an **API Product**, let a consumer **request an API key**, demonstrate **manual approval**, then call the HTTPS Route with the approved key.
+The base lab **does not install** OpenTelemetry Collector, Tempo, or Grafana:
 
-- [Full API Products and API Keys lab](docs/API-Products-and-API-Keys.md)
-- [Example APIProduct manifest](docs/api-product.yaml)
-- [OpenAPI definition](docs/openapi.yaml)
+```bash
+oc api-resources | grep -Ei 'opentelemetrycollector|tempo|telemetry|istio'
+oc get istio -A
+```
 
-First check the underlying policy state:
+To demonstrate traces, deploy a supported collector/tracing backend, then configure an **independently managed** Service Mesh gateway with:
+
+1. An Istio `meshConfig.extensionProviders` OpenTelemetry provider to OTLP/gRPC port `4317`.
+2. An Istio `Telemetry` object with appropriate gateway tracing sampling.
+3. Kuadrant `spec.observability.tracing.defaultEndpoint` and, if supported, Authorino/Limitador `spec.tracing.endpoint`.
+4. Parks application instrumentation if you need spans *inside* the Python handler.
+
+Send a unique `x-request-id` and correlate spans; there may be parent trace propagation gaps through WASM/Limitador. **Do not edit the OpenShift-managed `openshift-default` Istio control plane** for this POC. See [RHCL observability docs](https://docs.redhat.com/en/documentation/red_hat_connectivity_link/1.4/html/observability/rhcl-observability).
+
+### WAF and DDoS
+
+**RHCL authentication and rate limits are application-layer controls, not volumetric DDoS prevention.** A flood can exhaust the network, load balancers, ingress or Keycloak before gateway quota checks.
+
+For an AWS design: add WAF rules at CloudFront or an Application Load Balancer (**AWS WAF cannot attach directly to an NLB**), review AWS Shield, protect the **Keycloak Route**, and prevent public bypass of **both** the OpenShift router and the separate automatically created Gateway AWS LoadBalancer. Preserve expected Host/SNI.
+
+If you have deployed an external WAF, this is the safe acceptance test:
+
+- [ ] Normal authenticated API call through the WAF returns `200`.
+- [ ] A benign demo header rule (for example `X-Demo-Block: true`) blocks the call and records a WAF event.
+- [ ] The same WAF entry point still returns RHCL `401` for no key and `429` when throttled.
+- [ ] Attempts to bypass the WAF to origin are denied.
+
+**No WAF/Shield/firewall rules are provisioned by this repo; do not run attack traffic against shared clusters.**
+
+## 9. Troubleshooting
+
+Start with non-secret checks:
 
 ```bash
 bash scripts/check-policies.sh
-```
-
-If either policy is `Invalid / Not Accepted`, resolve its `.status.conditions[].message` before demonstrating products or credentials. API management in RHCL 1.4 is **Technology Preview**.
-
-## 9. JWT validation, Keycloak and DDoS safeguards
-
-The **JWT extension** adds an independent `/jwt/...` endpoint secured using **Red Hat build of Keycloak 26.4**, Kuadrant `AuthPolicy` and `RateLimitPolicy`. It does not replace the existing API-key path or API Product workflow.
-
-**Complete instructions:** [JWT + Keycloak + DDoS walkthrough](docs/JWT-Keycloak-and-DDoS.md).
-
-After completing the base lab and exposing the Parks HTTPS Route:
-
-```bash
-git pull --ff-only
-bash scripts/setup-jwt-demo.sh
-
-oc -n rhcl-parks-demo describe authpolicy parks-jwt-auth
-oc -n rhcl-parks-demo describe ratelimitpolicy parks-jwt-rate-limits
-```
-
-Both JWT policies must show **`Accepted=True` and `Enforced=True`**. In RHCL 1.4.3 the `jwt.audiences` field was silently dropped, so the JWT policy uses explicit issuer and audience authorization checks (`403` for incorrect signed claims). Next, log into Keycloak, copy the confidential client secret, request a short-lived access token and run the linked guide's tests:
-
-- `/jwt/ws/data/all` with valid JWT → **200**
-- Missing, expired or invalid JWT → **401**
-- 8 rapid authenticated requests → **429** (per-client rate limit)
-- `/ws/data/all` with the existing Alice API key → **200** (original path unchanged)
-
-**DDoS note:** RHCL authentication and throttling protect the API at application level. Use upstream AWS WAF + Shield, protect the Keycloak token endpoint and block direct access to bypass LoadBalancers for a proper perimeter defense. This repo does **not** provision AWS WAF/Shield. The Keycloak instance uses ephemeral development-mode storage and is not production suitable. For a Keycloak token endpoint `401`, verify you entered the **client secret**, not the bootstrap admin password.
-
-## Troubleshooting
-
-```bash
-oc -n rhcl-parks-demo get route parks-api-gateway -o yaml
-oc -n rhcl-parks-demo get gateway parks-gw -o yaml
-oc -n rhcl-parks-demo get httproute parks-api -o yaml
+oc get kuadrant -A
+oc get authorino,limitador -A
+oc -n rhcl-parks-demo get route,gateway,httproute
 oc -n rhcl-parks-demo describe authpolicy parks-auth
 oc -n rhcl-parks-demo describe ratelimitpolicy parks-rate-limits
-oc get kuadrant -A
+oc -n rhcl-parks-demo logs deployment/parks-api --tail=60
+```
+
+| Symptom | What to check |
+| --- | --- |
+| `Invalid / Not Accepted` or `MissingDependency` | Need Ready Kuadrant plus Authorino/Limitador, not only RHCL Operator CSV. |
+| API responds `200` **without** required key/token | **Stop** — bypass or unenforced AuthPolicy; no security demo until fixed. |
+| `404` | Route, Gateway listener and HTTPRoute hostnames must agree; rerun `scripts/expose-route.sh`. |
+| `503` | Gateway `Programmed=True` and backend endpoints/Pods Ready. |
+| No `429` | Policy `Enforced=True`, correct authenticated identity and fresh counters. |
+| API Products absent from console | Enable `kuadrant-console-plugin`; inspect `devportal.kuadrant.io` CRDs. |
+| Approved API Product key yields `401` | Check generated Secret labels/namespace, `parks-auth` selector, `APIKEY` prefix. |
+| Keycloak `invalid_client` | The OAuth **client** secret is different from the bootstrap admin password. |
+| JWT `403` | Compare actual token `iss` and `aud` to Keycloak Route and `parks-api`. |
+| JWT loop returns only `401` | Token TTL is just 120 seconds; issue a fresh token. |
+| Garbage bearer token `504` | Known RHCL 1.4.3 WASM-shim bug (above); preserve logs and open support case. |
+| TLS/certificate validation fails | For lab only, use `curl -k`; production requires trusted Route TLS. |
+
+**Old policy conflict:** If `oc apply` reports `Implicit and explicit defaults are mutually exclusive`, inspect `parks-auth`. Only when the live policy incorrectly has both `spec.defaults` and `spec.rules`, remove *only* obsolete defaults:
+
+```bash
+oc -n rhcl-parks-demo get authpolicy parks-auth -o yaml
+oc -n rhcl-parks-demo patch authpolicy parks-auth --type=json \
+  -p='[{"op":"remove","path":"/spec/defaults"}]'
+oc apply -f rhcl-parks-demo.yaml
+bash scripts/expose-route.sh
 bash scripts/check-policies.sh
 ```
 
-- **404**: check that Route, Gateway and HTTPRoute hostnames are identical; rerun `bash scripts/expose-route.sh`.
-- **503**: check Gateway `Programmed=True`, Service endpoints and Parks API readiness.
-- **200 without an API key**: RHCL authentication is not enforced; stop the security demo and inspect Kuadrant/Authorino.
-- **No 429**: check `RateLimitPolicy Enforced=True` and identity mapping.
-- **TLS error**: check the router certificate; `curl -k` is an option for this non-production lab.
-- **Route admitted but no access**: verify ingress availability/DNS and `oc -n rhcl-parks-demo describe route parks-api-gateway`.
+The patch does not remove your API-key Secrets; do **not** run it if `spec.defaults` is absent.
 
-**Security:** The credentials in the manifest are public example keys. The new Route terminates HTTPS at the OpenShift router but uses HTTP from that router to the Gateway. The Gateway also provisions a separate AWS LoadBalancer. Do not treat this lab as production-secure, and do not expose real data until policies are enforced.
+For JWT troubleshooting:
 
-## Cleanup (when finished)
+```bash
+oc -n rhcl-parks-demo get httproute parks-jwt -o yaml
+oc -n rhcl-parks-demo describe authpolicy parks-jwt-auth
+oc -n rhcl-parks-demo describe ratelimitpolicy parks-jwt-rate-limits
+oc -n rhcl-parks-demo logs deployment/parks-keycloak --tail=100
+```
+
+## 10. Cleanup, only when finished
+
+**This deletes the entire lab namespace**, including Parks, Keycloak and lab Secrets:
 
 ```bash
 oc delete namespace rhcl-parks-demo
 ```
 
-Do not delete the shared GatewayClass or Kuadrant instance.
+If you also created `rhcl-parks-consumer`, review its contents before separately removing it. **Do not delete** the shared GatewayClass or Kuadrant instance.
 
-## Files
+## Repository files
 
-- [rhcl-parks-demo.yaml](rhcl-parks-demo.yaml): API, Gateway, HTTPRoute and policies.
-- [scripts/expose-route.sh](scripts/expose-route.sh): create the Route and align hostnames.
-- [scripts/check-policies.sh](scripts/check-policies.sh): read-only RHCL policy troubleshooting.
-- [scripts/setup-jwt-demo.sh](scripts/setup-jwt-demo.sh): optional Keycloak/JWT installer.
-- [docs/JWT-Keycloak-and-DDoS.md](docs/JWT-Keycloak-and-DDoS.md): token management, JWT validation, 401/429 demos and upstream DDoS safeguards.
-- [docs/keycloak-realm.json](docs/keycloak-realm.json), [docs/keycloak-lab.yaml](docs/keycloak-lab.yaml) and [docs/jwt-protection-template.yaml](docs/jwt-protection-template.yaml): Keycloak and JWT manifests.
-- [RHCL-Parks-Demo-Guide.md](RHCL-Parks-Demo-Guide.md): advanced per-client limit, tracing, performance and WAF guidance.
-- [docs/API-Products-and-API-Keys.md](docs/API-Products-and-API-Keys.md): API discovery, product publishing, API key request/approval.
-- [docs/api-product.yaml](docs/api-product.yaml) and [docs/openapi.yaml](docs/openapi.yaml): Technology Preview APIProduct sample and OpenAPI description.
+| File | Purpose |
+| --- | --- |
+| [rhcl-parks-demo.yaml](rhcl-parks-demo.yaml) | Parks app, Gateway, API-key Secrets, AuthPolicy and RateLimitPolicy |
+| [scripts/expose-route.sh](scripts/expose-route.sh) | Create HTTPS Route and align Gateway/HTTPRoute hostnames |
+| [scripts/check-policies.sh](scripts/check-policies.sh) | Read-only policy and component diagnostics |
+| [scripts/setup-jwt-demo.sh](scripts/setup-jwt-demo.sh) | Add lab Keycloak, JWT HTTPRoute and policies |
+| [docs/keycloak-lab.yaml](docs/keycloak-lab.yaml), [docs/keycloak-realm.json](docs/keycloak-realm.json) | Keycloak deployment and sample realm |
+| [docs/jwt-protection-template.yaml](docs/jwt-protection-template.yaml) | JWT AuthPolicy and rate-limit configuration |
+| [docs/api-product.yaml](docs/api-product.yaml), [docs/openapi.yaml](docs/openapi.yaml) | Product catalog object and API specification |
 
 ## Official documentation
 
 - [RHCL 1.4 installation](https://docs.redhat.com/en/documentation/red_hat_connectivity_link/1.4/html/install_connectivity_link/rhcl-install-on-ocp)
-- [RHCL 1.4 policy examples](https://docs.redhat.com/en/documentation/red_hat_connectivity_link/1.4/html/deploy_red_hat_connectivity_link/connect-secure-apis-services)
-- [OpenShift 4.22 Routes](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/ingress_and_load_balancing/routes)
+- [RHCL authentication and policies](https://docs.redhat.com/en/documentation/red_hat_connectivity_link/1.4/html/deploy_red_hat_connectivity_link/connect-secure-apis-services)
+- [RHCL API Products and API Keys](https://docs.redhat.com/en/documentation/red_hat_connectivity_link/1.4/html/develop_apis_with_the_web_console/rhcl-api-management)
+- [RHCL OIDC/JWT](https://docs.redhat.com/en/documentation/red_hat_connectivity_link/1.4/html/deploy_red_hat_connectivity_link/rhcl-oidc-authentication)
+- [RHCL observability](https://docs.redhat.com/en/documentation/red_hat_connectivity_link/1.4/html/observability/rhcl-observability)
+- [Red Hat build of Keycloak](https://docs.redhat.com/en/documentation/red_hat_build_of_keycloak/26.4/html/server_guide/)
 - [OpenShift 4.22 Gateway API](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/ingress_and_load_balancing/configuring-gateway-api)
+- [AWS WAF](https://docs.aws.amazon.com/waf/latest/developerguide/how-aws-waf-works.html)
