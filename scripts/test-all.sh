@@ -29,8 +29,8 @@ usage() {
   printf '%s\n' \
     'Usage: bash scripts/test-all.sh [--quick] [--non-interactive] [--no-perf]' \
     '' \
-    'Default (~3-4 min): tests routing, policies, status codes, API-key limits,' \
-    'API Products/consumer approval, Keycloak JWT and JWT rate limits, plus 20' \
+    'Default (~3-4 min): tests routing, policies, status codes and active API plans,' \
+    'or (when active) Alice/Bob limits, API Products/approval, JWT and 20' \
     'small latency probes. Does NOT modify cluster resources or test volumetric DDoS.' \
     '' \
     '  --quick            Skip 65s sustained-quota and JWT-expiry wait tests' \
@@ -161,14 +161,44 @@ fi
 
 auth_ok=0
 rl_ok=0
+plan_ok=0
 if policy_status authpolicy parks-auth 'API-key AuthPolicy'; then auth_ok=1; fi
-if policy_status ratelimitpolicy parks-rate-limits 'API-key RateLimitPolicy'; then rl_ok=1; fi
 
-if [[ "$rl_ok" -ne 1 ]]; then
-  plans="$(oc -n "$NS" get planpolicy parks-plans -o name 2>/dev/null || true)"
-  if [[ -n "$plans" ]]; then
-    printf '%s\n' 'INFO: parks-plans exists and can override the original RateLimitPolicy.'
-    printf '%s\n' '      This script will NOT delete it. Review README Section 4.'
+# A PlanPolicy on the same HTTPRoute intentionally overrides its RateLimitPolicy.
+# Only recognise that as healthy when BOTH the override and the active PlanPolicy
+# have the expected status and target; a missing/broken policy remains a FAIL.
+rl_json="$(oc -n "$NS" get ratelimitpolicy parks-rate-limits -o json 2>/dev/null || true)"
+if [[ -z "$rl_json" ]]; then
+  fail 'API-key rate policy' 'parks-rate-limits missing'
+else
+  rl_accepted="$(printf '%s' "$rl_json" | jq -r '[.status.conditions[]? | select(.type=="Accepted") | .status] | last // "Unknown"')"
+  rl_enforced="$(printf '%s' "$rl_json" | jq -r '[.status.conditions[]? | select(.type=="Enforced") | .status] | last // "Unknown"')"
+  rl_reason="$(printf '%s' "$rl_json" | jq -r '[.status.conditions[]? | select(.type=="Enforced") | .reason] | last // ""')"
+  rl_message="$(printf '%s' "$rl_json" | jq -r '[.status.conditions[]? | select(.type=="Enforced") | .message] | last // ""')"
+  if [[ "$rl_accepted" == 'True' && "$rl_enforced" == 'True' ]]; then
+    pass 'API-key RateLimitPolicy' 'Accepted=True, Enforced=True (Alice/Bob limits)'
+    rl_ok=1
+  elif [[ "$rl_accepted" == 'True' && "$rl_enforced" == 'False' &&
+          "$rl_reason" == 'Overridden' && "$rl_message" == *"parks-plans"* ]]; then
+    plan_json="$(oc -n "$NS" get planpolicy parks-plans -o json 2>/dev/null || true)"
+    if [[ -z "$plan_json" ]]; then
+      fail 'API-key PlanPolicy' 'parks-rate-limits overridden, but parks-plans missing'
+    else
+      plan_accepted="$(printf '%s' "$plan_json" | jq -r '[.status.conditions[]? | select(.type=="Accepted") | .status] | last // "Unknown"')"
+      plan_enforced="$(printf '%s' "$plan_json" | jq -r '[.status.conditions[]? | select(.type=="Enforced") | .status] | last // "Unknown"')"
+      plan_target="$(printf '%s' "$plan_json" | jq -r '.spec.targetRef.kind // ""')/$(printf '%s' "$plan_json" | jq -r '.spec.targetRef.name // ""')"
+      plan_tiers="$(printf '%s' "$plan_json" | jq -r '[.spec.plans[]? | select(.tier != null and .limits.daily != null) | "\(.tier)=\(.limits.daily)/day"] | join(", ")')"
+      if [[ "$plan_accepted" == 'True' && "$plan_enforced" == 'True' &&
+            "$plan_target" == 'HTTPRoute/parks-api' && -n "$plan_tiers" ]]; then
+        skip 'API-key RateLimitPolicy' 'overridden by active parks-plans (expected)'
+        pass 'API-key PlanPolicy' "Accepted=True, Enforced=True; $plan_tiers (configuration, not 429 proof)"
+        plan_ok=1
+      else
+        fail 'API-key PlanPolicy' "Accepted=$plan_accepted Enforced=$plan_enforced Target=$plan_target Tiers=${plan_tiers:-none}"
+      fi
+    fi
+  else
+    fail 'API-key RateLimitPolicy' "Accepted=$rl_accepted Enforced=$rl_enforced Reason=${rl_reason:-unknown}; $rl_message"
   fi
 fi
 
@@ -233,9 +263,14 @@ if [[ "$rl_ok" -eq 1 && "$auth_ok" -eq 1 && "$api_ok" -eq 1 ]]; then
       fail 'Alice sustained 15/min' "15 calls: $sustained200 x 200, $sustained_other other; 16th=$sixteenth"
     fi
   fi
+elif [[ "$plan_ok" -eq 1 && "$auth_ok" -eq 1 && "$api_ok" -eq 1 ]]; then
+  skip 'Bob burst 429' 'parks-plans overrides Alice/Bob short-window quotas'
+  skip 'Alice burst 429' 'parks-plans overrides Alice/Bob short-window quotas'
+  skip 'Alice sustained 15/min' 'parks-plans enforces daily tiers instead'
+  skip 'Plan daily 429' 'would consume a shared daily tier quota; not part of safe smoke test'
 else
-  skip 'Bob burst 429' 'API unavailable or AuthPolicy/RateLimitPolicy not enforced'
-  skip 'Alice burst 429' 'API unavailable, PlanPolicy override, or missing policy'
+  skip 'Bob burst 429' 'API unavailable or active rate policy not enforced'
+  skip 'Alice burst 429' 'API unavailable or active rate policy not enforced'
   skip 'Alice sustained 15/min' 'needs parks-rate-limits Enforced=True'
 fi
 
