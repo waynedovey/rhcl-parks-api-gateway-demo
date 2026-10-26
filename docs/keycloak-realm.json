@@ -1,0 +1,33 @@
+{
+  "realm": "parks",
+  "enabled": true,
+  "displayName": "National Parks JWT Demo",
+  "accessTokenLifespan": 120,
+  "clients": [
+    {
+      "clientId": "parks-demo-client",
+      "name": "Parks API demo service client",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "protocolMappers": [
+        {
+          "name": "parks-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "parks-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ]
+}
