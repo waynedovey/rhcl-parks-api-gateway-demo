@@ -14,6 +14,8 @@ Demonstrate API gateway capabilities using **RHCL 1.4.3** on **OpenShift 4.22.18
 | OTel tracing | Optional observability stack setup | Trace gateway/policy requests (not preconfigured) |
 | Performance | Benchmark the HTTPS Route | p50/p95/p99; extra baseline steps in advanced guide |
 | WAF integration | Optional upstream WAF | WAF block + RHCL 401/429 (not preconfigured) |
+| JWT validation (optional module) | Keycloak-issued JWT, issuer/JWKS/audience validation | 401 invalid; 200 valid |
+| JWT API abuse limits (optional module) | Per-token subject + aggregate quotas | 429 when over quota; not volumetric DDoS protection |
 
 ## Architecture
 
@@ -241,6 +243,8 @@ Do not delete the shared GatewayClass or Kuadrant instance.
 - [scripts/check-policies.sh](scripts/check-policies.sh): read-only RHCL policy troubleshooting.
 - [RHCL-Parks-Demo-Guide.md](RHCL-Parks-Demo-Guide.md): advanced per-client limit, tracing, performance and WAF guidance.
 - [docs/API-Products-and-API-Keys.md](docs/API-Products-and-API-Keys.md): API discovery, product publishing, API key request/approval.
+- [docs/Keycloak-JWT-and-DDoS.md](docs/Keycloak-JWT-and-DDoS.md): optional Keycloak setup, JWT verification, and API abuse / DDoS security boundary.
+- [scripts/deploy-jwt.sh](scripts/deploy-jwt.sh) and [scripts/test-jwt.sh](scripts/test-jwt.sh): opt-in JWT deployment and safe 401/200/429 smoke tests.
 - [docs/api-product.yaml](docs/api-product.yaml) and [docs/openapi.yaml](docs/openapi.yaml): Technology Preview APIProduct sample and OpenAPI description.
 
 ## Official documentation
