@@ -2,7 +2,7 @@
 # Requires a Keycloak CR named parks-keycloak in namespace keycloak.
 # Create Secret keycloak/parks-client-secret with data key 'secret' BEFORE applying.
 # The operator imports a new realm only; it does not reconcile edits to an existing one.
-apiVersion: k8s.keycloak.org/v2beta1
+apiVersion: k8s.keycloak.org/v2alpha1
 kind: KeycloakRealmImport
 metadata:
   name: parks-realm-import
