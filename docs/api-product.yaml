@@ -21,7 +21,7 @@ spec:
     name: parks-api
   documentation:
     openAPISpecURL: "https://raw.githubusercontent.com/waynedovey/rhcl-parks-api-gateway-demo/main/docs/openapi.yaml"
-    docsURL: "https://github.com/waynedovey/rhcl-parks-api-gateway-demo/blob/main/docs/API-Products-and-API-Keys.md"
+    docsURL: "https://github.com/waynedovey/rhcl-parks-api-gateway-demo/blob/main/README.md"
     gitRepository: "https://github.com/waynedovey/rhcl-parks-api-gateway-demo"
   contact:
     team: "Parks API Lab"
