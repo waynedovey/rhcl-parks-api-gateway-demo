@@ -1,0 +1,80 @@
+# LAB ONLY: a single RHBK development-mode instance with nonpersistent storage.
+# Not production HA, not production TLS, and not a persistent identity store.
+# The setup script creates both referenced Secret and ConfigMap before applying.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parks-keycloak
+  namespace: rhcl-parks-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: parks-keycloak
+  template:
+    metadata:
+      labels:
+        app: parks-keycloak
+    spec:
+      containers:
+        - name: keycloak
+          image: registry.redhat.io/rhbk/keycloak-rhel9:26.4
+          args:
+            - start-dev
+            - --import-realm
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: parks-keycloak-bootstrap
+                  key: username
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: parks-keycloak-bootstrap
+                  key: password
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            - name: KC_PROXY_HEADERS
+              value: xforwarded
+            # The setup script replaces this placeholder with the OpenShift HTTPS Route.
+            - name: KC_HOSTNAME
+              value: https://replace-after-route.example.test
+          readinessProbe:
+            httpGet:
+              path: /realms/parks
+              port: http
+            periodSeconds: 10
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          volumeMounts:
+            - name: realm-import
+              mountPath: /opt/keycloak/data/import/parks-realm.json
+              subPath: parks-realm.json
+              readOnly: true
+      volumes:
+        - name: realm-import
+          configMap:
+            name: parks-keycloak-realm
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: parks-keycloak
+  namespace: rhcl-parks-demo
+spec:
+  selector:
+    app: parks-keycloak
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
