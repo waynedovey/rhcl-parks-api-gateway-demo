@@ -119,6 +119,8 @@ Set the secret in your terminal **without putting it in your shell history**:
 read -rs KC_CLIENT_SECRET
 # Paste the value and press Enter (typing will not echo).
 echo
+printf 'Client secret characters captured: %s\n' "${#KC_CLIENT_SECRET}"
+# Expected: a nonzero length. If 0, run the read command again.
 ```
 
 The `client_id` is `parks-demo-client`. **The Keycloak bootstrap admin password is NOT the OAuth client secret.** Use **Clients → parks-demo-client → Credentials → Client secret**. If Keycloak was restarted in development mode, recheck the client secret because its in-memory database might have been recreated. Do not store the client secret, JWT or bootstrap password in Git.
