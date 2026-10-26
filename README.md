@@ -56,10 +56,10 @@ You need:
 - The RHCL Operator **and a Ready `Kuadrant` instance** with Authorino and Limitador. The Operator alone is insufficient.
 - OpenShift's native `openshift-default` GatewayClass, with `Accepted=True`.
 
-**Missing Kuadrant?** In **Ecosystem → Installed Operators → Red Hat Connectivity Link → Kuadrant → Create Kuadrant**, create the instance in the **same namespace where the RHCL Operator is installed**. Or, if the Operator is installed in `kuadrant-system`:
+**Missing Kuadrant?** Create it in the **same namespace where the RHCL Operator is installed**. On Wayne's cluster that namespace is **`openshift-operators`** (verify using `oc get deployments -A | grep kuadrant-operator`). In the console: **Ecosystem → Installed Operators → Red Hat Connectivity Link → Kuadrant → Create Kuadrant**. Or use:
 
 ```bash
-oc -n kuadrant-system apply -f - <<'EOF'
+oc -n openshift-operators apply -f - <<'EOF'
 apiVersion: kuadrant.io/v1beta1
 kind: Kuadrant
 metadata:
@@ -67,11 +67,11 @@ metadata:
 spec: {}
 EOF
 
-oc -n kuadrant-system wait kuadrant/kuadrant \
+oc -n openshift-operators wait kuadrant/kuadrant \
   --for=condition=Ready=True --timeout=300s
 ```
 
-Replace `kuadrant-system` if your Operator lives in another namespace. Reuse a healthy existing Kuadrant instance—do not create duplicates.
+Replace `openshift-operators` if your Operator lives in another namespace. If the policies still say `MissingDependency` after creating Kuadrant and the native GatewayClass is ready, restart the discovered Operator Deployment using `oc -n openshift-operators rollout restart deployment/kuadrant-operator-controller-manager`. Reuse a healthy existing Kuadrant instance—do not create duplicates.
 
 **Missing GatewayClass?** An administrator can enable OpenShift's built-in controller:
 
