@@ -50,4 +50,5 @@ echo "  oc -n $NS describe authpolicy parks-auth"
 echo "  oc -n $NS describe ratelimitpolicy parks-rate-limits"
 echo
 echo "Test (after the policies show Enforced=True):"
-echo "  curl -i -H 'Authorization: APIKEY alice-parks-demo-key' https://$host/ws/data/all"
+echo "  curl -k -i -H 'Authorization: APIKEY alice-parks-demo-key' https://$host/ws/data/all"
+echo "NOTE: curl -k disables TLS certificate verification; lab use only."
