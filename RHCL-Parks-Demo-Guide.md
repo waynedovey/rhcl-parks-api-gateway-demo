@@ -1,8 +1,8 @@
 # RHCL 1.4.3 on OpenShift 4.22 — Parks API demo
 
-This self-contained lab uses OpenShift's `openshift-default` GatewayClass, the RHCL-provided `AuthPolicy` and `RateLimitPolicy` APIs, and a small National Parks-themed API. It does **not** deploy the original National Parks/MongoDB application or the Parksmap user interface. The demo API uses familiar `/ws/info/` and `/ws/data/all` endpoints with four bundled sample parks.
+This self-contained lab exposes a National Parks-themed API through an **OpenShift HTTPS Route -> Gateway Service -> RHCL Gateway/HTTPRoute**. It uses OpenShift's `openshift-default` GatewayClass and RHCL `AuthPolicy`/`RateLimitPolicy` APIs. It does **not** deploy the original National Parks/MongoDB application or the Parksmap user interface. The demo API uses familiar `/ws/info/` and `/ws/data/all` endpoints with four bundled sample parks.
 
-**Status:** manifest YAML and embedded Python have been parsed successfully; the Python endpoints were tested locally. The manifests have **not** been applied to your OpenShift cluster, so cluster-specific validation is required.
+**Status:** Wayne deployed the Parks API and OpenShift Gateway on 4.22.18 successfully. The HTTPS Route is created by a separate helper script. RHCL authentication/rate-limit enforcement still requires a Ready Kuadrant instance and cluster validation.
 
 ## 1. Check the cluster prerequisites
 
@@ -52,28 +52,33 @@ oc -n rhcl-parks-demo get ratelimitpolicy parks-rate-limits -o yaml
 
 Confirm that Gateway is `Programmed=True`, HTTPRoute has `Accepted=True` and `ResolvedRefs=True`, and both policies have `Accepted=True` and `Enforced=True`. If one is not ready, inspect its `.status.conditions` before sending demo traffic. Policy reconciliation can take a short time.
 
-No external DNS or TLS is needed for these initial tests. The example gateway accepts `Host: parks-api.example.test` on HTTP port 80. `.example.test` is just a lab host header and is not a public DNS record.
+The manifest starts with a placeholder hostname (`parks-api.example.test`). The Route helper script replaces it on the live Gateway and HTTPRoute with the cluster-assigned OpenShift Route hostname. **Rerun the helper after reapplying this manifest**, because `oc apply` can restore the placeholder.
 
-## 3. Connect to the gateway
+## 3. Create and use an OpenShift HTTPS Route
 
-In **Terminal 1**, run:
+Run from the cloned repository **after** the Gateway Service appears:
 
 ```bash
 oc -n rhcl-parks-demo get svc
-oc -n rhcl-parks-demo port-forward svc/parks-gw 18080:80
+bash scripts/expose-route.sh
+oc -n rhcl-parks-demo get route parks-api-gateway
 ```
 
-The native Gateway API controller normally creates the `parks-gw` Service. If no such Service appears, stop and inspect the Gateway's `Programmed` status and service references before changing the YAML.
+OpenShift 4.22 created the Gateway Service as `parks-gw-openshift-default` (not `parks-gw`). The script creates an **edge-TLS Route** pointing at that Service, reads the assigned DNS host, and patches both Gateway API hostnames to match. It is idempotent and safe to rerun. There is no need to leave a port-forward process running.
 
-In **Terminal 2**, set:
+**Do not create the Route directly to the `parks-api` Service**—that would skip the gateway policies. Do not run the tests as an authentication demonstration until the `AuthPolicy` and `RateLimitPolicy` report `Enforced=True`.
+
+In your testing terminal, set:
 
 ```bash
-export PARKS_URL=http://127.0.0.1:18080
-export PARKS_HOST=parks-api.example.test
+export PARKS_URL="https://$(oc -n rhcl-parks-demo get route parks-api-gateway -o jsonpath='{.spec.host}')"
 export ALICE_KEY=alice-parks-demo-key
 export BOB_KEY=bob-parks-demo-key
 export BENCH_KEY=benchmark-parks-demo-key
+echo "$PARKS_URL"
 ```
+
+The browser should also reach `$PARKS_URL/ws/info/` once authentication is configured; browsers without an API key should receive an authentication error. If the cluster's router certificate isn't trusted, `curl -k` may be used **in this lab only**.
 
 These are **public example lab credentials** embedded in the YAML for convenience. Never use them for real systems or leave them exposed as a production API.
 
@@ -82,8 +87,7 @@ These are **public example lab credentials** embedded in the YAML for convenienc
 ### 200 — valid API request
 
 ```bash
-curl -i -H "Host: $PARKS_HOST" \
-  -H "Authorization: APIKEY $ALICE_KEY" \
+curl -i -H "Authorization: APIKEY $ALICE_KEY" \
   "$PARKS_URL/ws/data/all"
 ```
 
@@ -92,8 +96,7 @@ Expected: `HTTP 200`, JSON containing four national parks.
 ### 400 — missing required application parameter
 
 ```bash
-curl -i -H "Host: $PARKS_HOST" \
-  -H "Authorization: APIKEY $ALICE_KEY" \
+curl -i -H "Authorization: APIKEY $ALICE_KEY" \
   "$PARKS_URL/ws/data/park"
 ```
 
@@ -102,7 +105,7 @@ Expected: `HTTP 400` and `name query parameter is required`. This `400` is gener
 ### 401 — missing API key
 
 ```bash
-curl -i -H "Host: $PARKS_HOST" "$PARKS_URL/ws/info/"
+curl -i "$PARKS_URL/ws/info/"
 ```
 
 Expected: unauthorized (normally `HTTP 401`). This response is enforced by RHCL/Authorino.
@@ -110,8 +113,7 @@ Expected: unauthorized (normally `HTTP 401`). This response is enforced by RHCL/
 ### 404 — nonexistent resource
 
 ```bash
-curl -i -H "Host: $PARKS_HOST" \
-  -H "Authorization: APIKEY $ALICE_KEY" \
+curl -i -H "Authorization: APIKEY $ALICE_KEY" \
   "$PARKS_URL/ws/data/park?name=Atlantis"
 ```
 
@@ -132,7 +134,6 @@ The deployed `RateLimitPolicy` has independent identity-based counters:
 ```bash
 for i in $(seq 1 8); do
   curl -sS -o /dev/null -w "Bob request $i: %{http_code}\n" \
-    -H "Host: $PARKS_HOST" \
     -H "Authorization: APIKEY $BOB_KEY" \
     "$PARKS_URL/ws/data/all"
 done
@@ -145,7 +146,6 @@ On fresh counters, expect two `200`s followed by `429`s. Alice has a separate co
 ```bash
 for i in $(seq 1 8); do
   curl -sS -o /dev/null -w "Alice request $i: %{http_code}\n" \
-    -H "Host: $PARKS_HOST" \
     -H "Authorization: APIKEY $ALICE_KEY" \
     "$PARKS_URL/ws/data/all"
 done
@@ -161,16 +161,14 @@ After allowing old demo counters to expire (at least 65 seconds is convenient), 
 for batch in 1 2 3; do
   for i in $(seq 1 5); do
     curl -sS -o /dev/null -w "%{http_code} " \
-      -H "Host: $PARKS_HOST" \
-      -H "Authorization: APIKEY $ALICE_KEY" \
+        -H "Authorization: APIKEY $ALICE_KEY" \
       "$PARKS_URL/ws/info/"
   done
   echo
   sleep 11
 done
 
-curl -i -H "Host: $PARKS_HOST" \
-  -H "Authorization: APIKEY $ALICE_KEY" \
+curl -i -H "Authorization: APIKEY $ALICE_KEY" \
   "$PARKS_URL/ws/info/"
 ```
 
@@ -178,26 +176,25 @@ The sixteenth request should return `429` if it is within the one-minute counter
 
 ## 6. Demonstrate latency
 
-In **Terminal 3**, open a direct connection to the backend:
+Optionally open a direct backend port-forward **only to collect a rough baseline**. All gateway demos still use the HTTPS Route:
 
 ```bash
 oc -n rhcl-parks-demo port-forward svc/parks-api 18081:8080
 ```
 
-Run these commands from Terminal 2 if you have the `hey` benchmark tool available:
+Run these commands from your testing terminal if you have the `hey` benchmark tool available:
 
 ```bash
 # Backend only: no gateway or auth/rate-limit policy
 hey -n 1000 -c 10 http://127.0.0.1:18081/ws/data/all
 
-# Gateway + authentication + rate checking; uses the high-quota benchmark client
+# HTTPS Route + authentication + rate checking; high-quota benchmark client
 hey -n 1000 -c 10 \
-  -H "Host: parks-api.example.test" \
   -H "Authorization: APIKEY benchmark-parks-demo-key" \
-  http://127.0.0.1:18080/ws/data/all
+  "$PARKS_URL/ws/data/all"
 ```
 
-Compare p50/p95/p99 latency, throughput and non-2xx counts. This port-forward comparison is suitable for an illustrative demo **only**; both paths add port-forward overhead. For a customer SLA, run a separate load generator over the real externally exposed gateway, compare like-for-like request sizes, and repeat with OTel sampling enabled.
+Compare p50/p95/p99 latency, throughput and non-2xx counts. The direct backend test is a local port-forward, while the gateway test now goes through the HTTPS Route (extra router and TLS overhead); **this is not a fair isolated RHCL-overhead comparison**. For a customer SLA, benchmark both paths from a controlled equivalent network vantage point with comparable TLS and ingress layers.
 
 ## 7. OpenTelemetry tracing — required setup, not included in the base manifest
 
@@ -227,7 +224,7 @@ Reference: [Red Hat Connectivity Link 1.4 Observability guide](https://docs.redh
 
 The base manifest does **not** deploy a WAF, because the necessary policies and connection configuration depend on your WAF vendor and on how the cluster gateway is externally exposed.
 
-To demonstrate a real WAF, place your selected WAF (Cloudflare, F5, Akamai, AWS WAF, etc.) upstream of the Gateway's public endpoint; preserve the `Host` header and original client identity; block direct access to the unprotected origin; and create a temporary test rule, such as rejecting a request header `X-Demo-Block: true`.
+To demonstrate a real WAF, place your selected WAF (Cloudflare, F5, Akamai, AWS WAF, etc.) upstream of the Route hostname; preserve the `Host` header and original client identity; block access to alternate entry points (especially the separate AWS LoadBalancer automatically created for the Gateway); and create a temporary test rule, such as rejecting a request header `X-Demo-Block: true`.
 
 Then verify:
 
@@ -242,6 +239,7 @@ This is a design/test procedure, not a vendor-independent, deployable WAF policy
 ## 9. Troubleshooting
 
 ```bash
+oc -n rhcl-parks-demo describe route parks-api-gateway
 oc -n rhcl-parks-demo describe gateway parks-gw
 oc -n rhcl-parks-demo describe httproute parks-api
 oc -n rhcl-parks-demo describe authpolicy parks-auth
@@ -251,11 +249,11 @@ oc get kuadrant -A
 oc get pods -A | grep -Ei 'authorino|limitador|kuadrant'
 ```
 
-- **404 from gateway:** confirm the exact `Host: parks-api.example.test` header and that `HTTPRoute` is Accepted.
+- **404 from gateway:** rerun `bash scripts/expose-route.sh` and confirm the OpenShift Route hostname exactly matches both the Gateway listener and HTTPRoute hostname.
 - **503:** confirm `parks-api` pod is Ready and Service has a healthy endpoint.
 - **All requests return 401:** check `AuthPolicy` Enforced status, API key Secret labels, and authorization header `APIKEY` prefix.
 - **Rate limits never trigger:** verify `RateLimitPolicy` Enforced status and the identity mapping in `AuthPolicy` before testing.
-- **Gateway has no Service:** verify GatewayClass Accepted/ControllerInstalled and Gateway Programmed status. A bare-metal cluster may also require separate load-balancer configuration for external access, though local Service port-forwarding should work once a gateway Service exists.
+- **Gateway has no Service:** verify GatewayClass Accepted/ControllerInstalled and Gateway Programmed status; on this cluster the generated Service is `parks-gw-openshift-default`, not `parks-gw`.
 
 ## 10. Cleanup (optional)
 
