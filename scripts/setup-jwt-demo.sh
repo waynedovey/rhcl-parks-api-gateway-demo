@@ -97,5 +97,5 @@ echo "  oc -n $NS get secret parks-keycloak-bootstrap -o jsonpath='{.data.passwo
 echo
 echo "NEXT: Open the Keycloak Route, log in as admin, select realm parks,"
 echo "then Clients > parks-demo-client > Credentials to copy its client secret."
-echo "Follow docs/JWT-Keycloak-and-DDoS.md for token requests and 401/200/429 tests."
+echo "Follow README.md section 6 for token requests and 200/401/429 tests."
 echo "IMPORTANT: This development-mode Keycloak is for the lab only."
