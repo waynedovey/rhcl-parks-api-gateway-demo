@@ -1,0 +1,121 @@
+openapi: 3.0.3
+info:
+  title: National Parks API (RHCL Demo)
+  description: |
+    A small National Parks-themed demonstration API protected by Red Hat
+    Connectivity Link. The OpenShift Route hostname is assigned at deployment.
+  version: "1.0.0"
+servers:
+  - url: /
+    description: Use the current OpenShift Route hostname.
+tags:
+  - name: Parks
+    description: Browse a small set of national parks.
+security:
+  - ParksApiKey: []
+paths:
+  /ws/info/:
+    get:
+      tags: [Parks]
+      summary: Describe the API
+      operationId: getInfo
+      responses:
+        "200":
+          description: API information
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  displayName:
+                    type: string
+                  endpoints:
+                    type: array
+                    items:
+                      type: string
+        "401":
+          description: Missing or invalid API key (when AuthPolicy is enforced)
+        "429":
+          description: Client rate limit exceeded (when RateLimitPolicy is enforced)
+  /ws/data/all:
+    get:
+      tags: [Parks]
+      summary: List all parks
+      operationId: listParks
+      responses:
+        "200":
+          description: Four example national parks
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count:
+                    type: integer
+                  parks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Park"
+        "401":
+          description: Missing or invalid API key
+        "429":
+          description: Rate limit exceeded
+  /ws/data/park:
+    get:
+      tags: [Parks]
+      summary: Search parks by name
+      operationId: searchPark
+      parameters:
+        - name: name
+          in: query
+          required: true
+          description: A case-insensitive substring of a national park name.
+          schema:
+            type: string
+          example: Kakadu
+      responses:
+        "200":
+          description: Matching parks
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  parks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Park"
+        "400":
+          description: Required name query parameter missing
+        "401":
+          description: Missing or invalid API key
+        "404":
+          description: No matching park
+        "429":
+          description: Rate limit exceeded
+components:
+  securitySchemes:
+    ParksApiKey:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: "Send as: Authorization: APIKEY <your-key>"
+  schemas:
+    Park:
+      type: object
+      required: [name, state, lat, lon]
+      properties:
+        name:
+          type: string
+          example: Kakadu National Park
+        state:
+          type: string
+          example: NT
+        lat:
+          type: number
+          example: -12.85
+        lon:
+          type: number
+          example: 132.87
