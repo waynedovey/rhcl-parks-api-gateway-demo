@@ -74,7 +74,7 @@ http_code() {
   local url="$1"
   shift
   local result
-  if result="$(curl "${CURL_TLS[@]}" -sS --connect-timeout 8 --max-time 20 \
+  if result="$(curl "${CURL_TLS[@]}" -sS --connect-timeout 4 --max-time 12 \
     -o /dev/null -w '%{http_code}' "$@" "$url" 2>/dev/null)"; then
     printf '%s\n' "$result"
   else
@@ -89,8 +89,10 @@ expect_code() {
   actual="$(http_code "$url" "$@")"
   if [[ "$actual" == "$expected" ]]; then
     pass "$title" "HTTP $actual"
+    return 0
   else
     fail "$title" "expected $expected, got $actual"
+    return 1
   fi
 }
 
@@ -171,8 +173,11 @@ if [[ "$rl_ok" -ne 1 ]]; then
 fi
 
 section 'HTTP status codes'
-expect_code '200: valid API key' 200 "$PARKS_URL/ws/data/all" \
-  -H "Authorization: APIKEY $ALICE_KEY"
+api_ok=0
+if expect_code '200: valid API key' 200 "$PARKS_URL/ws/data/all" \
+  -H "Authorization: APIKEY $ALICE_KEY"; then
+  api_ok=1
+fi
 expect_code '400: missing name' 400 "$PARKS_URL/ws/data/park" \
   -H "Authorization: APIKEY $ALICE_KEY"
 expect_code '401: missing API key' 401 "$PARKS_URL/ws/info/"
@@ -198,7 +203,7 @@ burst_test() {
 }
 
 section 'Client rate limiting'
-if [[ "$rl_ok" -eq 1 && "$auth_ok" -eq 1 ]]; then
+if [[ "$rl_ok" -eq 1 && "$auth_ok" -eq 1 && "$api_ok" -eq 1 ]]; then
   burst_test Bob "$BOB_KEY"
   burst_test Alice "$ALICE_KEY"
 
@@ -229,8 +234,8 @@ if [[ "$rl_ok" -eq 1 && "$auth_ok" -eq 1 ]]; then
     fi
   fi
 else
-  skip 'Bob burst 429' 'AuthPolicy or RateLimitPolicy not enforced'
-  skip 'Alice burst 429' 'PlanPolicy override or missing policy'
+  skip 'Bob burst 429' 'API unavailable or AuthPolicy/RateLimitPolicy not enforced'
+  skip 'Alice burst 429' 'API unavailable, PlanPolicy override, or missing policy'
   skip 'Alice sustained 15/min' 'needs parks-rate-limits Enforced=True'
 fi
 
@@ -398,6 +403,8 @@ skip 'Malformed JWT negative test' 'RHCL 1.4.3 WASM-shim 504 defect; test intent
 section 'End-to-end latency smoke test'
 if [[ "$PERFORMANCE" -eq 0 ]]; then
   skip 'Latency p50/p95/p99' 'skipped by --no-perf'
+elif [[ "$api_ok" -ne 1 ]]; then
+  skip 'Latency p50/p95/p99' 'API not reachable; no benchmark attempted'
 else
   latency_values=()
   perf_errors=0
@@ -412,6 +419,7 @@ else
       latency_values+=("$elapsed")
     else
       perf_errors=$((perf_errors+1))
+      break
     fi
   done
   if (( ${#latency_values[@]} == 20 && perf_errors == 0 )); then
@@ -419,7 +427,7 @@ else
       '{a[NR]=$1} END{printf "p50=%.1fms p95=%.1fms p99=%.1fms",a[10]*1000,a[19]*1000,a[20]*1000}')"
     pass 'Latency p50/p95/p99' "$percentile_text (20 samples, not a load-test SLA)"
   else
-    fail 'Latency p50/p95/p99' "$perf_errors / 20 requests failed"
+    fail 'Latency p50/p95/p99' "only ${#latency_values[@]} successful; $perf_errors failed (stopped early)"
   fi
 fi
 
