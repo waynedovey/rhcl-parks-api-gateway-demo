@@ -101,6 +101,8 @@ oc -n rhcl-parks-demo get gateway,httproute,pods,svc,authpolicy,ratelimitpolicy
 
 The gateway should reach `Programmed=True`. The native Gateway controller generates a Service called `parks-gw-openshift-default` in this OpenShift 4.22 setup.
 
+**Already have a `parks-auth` policy?** If apply reports `Implicit and explicit defaults are mutually exclusive`, the old manifest is colliding with your existing `spec.rules`. This repository now uses only `spec.rules`. See the [safe targeted repair](docs/JWT-Keycloak-and-DDoS.md#a-common-repair-parks-auth-already-has-specrules).
+
 ## 3. Create the HTTPS Route
 
 Run **after** the Gateway is created:
@@ -224,14 +226,14 @@ oc -n rhcl-parks-demo describe authpolicy parks-jwt-auth
 oc -n rhcl-parks-demo describe ratelimitpolicy parks-jwt-rate-limits
 ```
 
-Both JWT policies must show **`Accepted=True` and `Enforced=True`**. Next, log into Keycloak, copy the confidential client secret, request a short-lived access token and run the linked guide's tests:
+Both JWT policies must show **`Accepted=True` and `Enforced=True`**. In RHCL 1.4.3 the `jwt.audiences` field was silently dropped, so the JWT policy uses explicit issuer and audience authorization checks (`403` for incorrect signed claims). Next, log into Keycloak, copy the confidential client secret, request a short-lived access token and run the linked guide's tests:
 
 - `/jwt/ws/data/all` with valid JWT → **200**
 - Missing, expired or invalid JWT → **401**
 - 8 rapid authenticated requests → **429** (per-client rate limit)
 - `/ws/data/all` with the existing Alice API key → **200** (original path unchanged)
 
-**DDoS note:** RHCL authentication and throttling protect the API at application level. Use upstream AWS WAF + Shield, protect the Keycloak token endpoint and block direct access to bypass LoadBalancers for a proper perimeter defense. This repo does **not** provision AWS WAF/Shield. The Keycloak instance uses ephemeral development-mode storage and is not production suitable.
+**DDoS note:** RHCL authentication and throttling protect the API at application level. Use upstream AWS WAF + Shield, protect the Keycloak token endpoint and block direct access to bypass LoadBalancers for a proper perimeter defense. This repo does **not** provision AWS WAF/Shield. The Keycloak instance uses ephemeral development-mode storage and is not production suitable. For a Keycloak token endpoint `401`, verify you entered the **client secret**, not the bootstrap admin password.
 
 ## Troubleshooting
 
