@@ -189,6 +189,22 @@ The Route adds an OpenShift HAProxy ingress hop and TLS termination, so this is 
 
 See the [advanced guide](RHCL-Parks-Demo-Guide.md#7-opentelemetry-tracing--required-setup-not-included-in-the-base-manifest) for the configuration prerequisites and [WAF checks](RHCL-Parks-Demo-Guide.md#8-waf-integration--external-dependency).
 
+## 8. API Products and API Keys (Technology Preview)
+
+Publish the existing Parks `HTTPRoute` as an **API Product**, let a consumer **request an API key**, demonstrate **manual approval**, then call the HTTPS Route with the approved key.
+
+- [Full API Products and API Keys lab](docs/API-Products-and-API-Keys.md)
+- [Example APIProduct manifest](docs/api-product.yaml)
+- [OpenAPI definition](docs/openapi.yaml)
+
+First check the underlying policy state:
+
+```bash
+bash scripts/check-policies.sh
+```
+
+If either policy is `Invalid / Not Accepted`, resolve its `.status.conditions[].message` before demonstrating products or credentials. API management in RHCL 1.4 is **Technology Preview**.
+
 ## Troubleshooting
 
 ```bash
@@ -198,6 +214,7 @@ oc -n rhcl-parks-demo get httproute parks-api -o yaml
 oc -n rhcl-parks-demo describe authpolicy parks-auth
 oc -n rhcl-parks-demo describe ratelimitpolicy parks-rate-limits
 oc get kuadrant -A
+bash scripts/check-policies.sh
 ```
 
 - **404**: check that Route, Gateway and HTTPRoute hostnames are identical; rerun `bash scripts/expose-route.sh`.
@@ -221,7 +238,10 @@ Do not delete the shared GatewayClass or Kuadrant instance.
 
 - [rhcl-parks-demo.yaml](rhcl-parks-demo.yaml): API, Gateway, HTTPRoute and policies.
 - [scripts/expose-route.sh](scripts/expose-route.sh): create the Route and align hostnames.
+- [scripts/check-policies.sh](scripts/check-policies.sh): read-only RHCL policy troubleshooting.
 - [RHCL-Parks-Demo-Guide.md](RHCL-Parks-Demo-Guide.md): advanced per-client limit, tracing, performance and WAF guidance.
+- [docs/API-Products-and-API-Keys.md](docs/API-Products-and-API-Keys.md): API discovery, product publishing, API key request/approval.
+- [docs/api-product.yaml](docs/api-product.yaml) and [docs/openapi.yaml](docs/openapi.yaml): Technology Preview APIProduct sample and OpenAPI description.
 
 ## Official documentation
 
