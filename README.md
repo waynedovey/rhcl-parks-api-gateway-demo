@@ -14,6 +14,9 @@ Demonstrate API gateway capabilities using **RHCL 1.4.3** on **OpenShift 4.22.18
 | OTel tracing | Optional observability stack setup | Trace gateway/policy requests (not preconfigured) |
 | Performance | Benchmark the HTTPS Route | p50/p95/p99; extra baseline steps in advanced guide |
 | WAF integration | Optional upstream WAF | WAF block + RHCL 401/429 (not preconfigured) |
+| JWT token validation | RHBK Keycloak client credentials, signature/issuer/audience checks | 200 valid; 401 missing/invalid/expired |
+| JWT quotas | Per-service-account and aggregate rate limits | 429 on policy breach |
+| DDoS defense in depth | AWS WAF/Shield + origin/network restrictions | Architecture guidance; AWS protections not provisioned |
 
 ## Architecture
 
@@ -205,6 +208,31 @@ bash scripts/check-policies.sh
 
 If either policy is `Invalid / Not Accepted`, resolve its `.status.conditions[].message` before demonstrating products or credentials. API management in RHCL 1.4 is **Technology Preview**.
 
+## 9. JWT validation, Keycloak and DDoS safeguards
+
+The **JWT extension** adds an independent `/jwt/...` endpoint secured using **Red Hat build of Keycloak 26.4**, Kuadrant `AuthPolicy` and `RateLimitPolicy`. It does not replace the existing API-key path or API Product workflow.
+
+**Complete instructions:** [JWT + Keycloak + DDoS walkthrough](docs/JWT-Keycloak-and-DDoS.md).
+
+After completing the base lab and exposing the Parks HTTPS Route:
+
+```bash
+git pull --ff-only
+bash scripts/setup-jwt-demo.sh
+
+oc -n rhcl-parks-demo describe authpolicy parks-jwt-auth
+oc -n rhcl-parks-demo describe ratelimitpolicy parks-jwt-rate-limits
+```
+
+Both JWT policies must show **`Accepted=True` and `Enforced=True`**. Next, log into Keycloak, copy the confidential client secret, request a short-lived access token and run the linked guide's tests:
+
+- `/jwt/ws/data/all` with valid JWT → **200**
+- Missing, expired or invalid JWT → **401**
+- 8 rapid authenticated requests → **429** (per-client rate limit)
+- `/ws/data/all` with the existing Alice API key → **200** (original path unchanged)
+
+**DDoS note:** RHCL authentication and throttling protect the API at application level. Use upstream AWS WAF + Shield, protect the Keycloak token endpoint and block direct access to bypass LoadBalancers for a proper perimeter defense. This repo does **not** provision AWS WAF/Shield. The Keycloak instance uses ephemeral development-mode storage and is not production suitable.
+
 ## Troubleshooting
 
 ```bash
@@ -239,6 +267,9 @@ Do not delete the shared GatewayClass or Kuadrant instance.
 - [rhcl-parks-demo.yaml](rhcl-parks-demo.yaml): API, Gateway, HTTPRoute and policies.
 - [scripts/expose-route.sh](scripts/expose-route.sh): create the Route and align hostnames.
 - [scripts/check-policies.sh](scripts/check-policies.sh): read-only RHCL policy troubleshooting.
+- [scripts/setup-jwt-demo.sh](scripts/setup-jwt-demo.sh): optional Keycloak/JWT installer.
+- [docs/JWT-Keycloak-and-DDoS.md](docs/JWT-Keycloak-and-DDoS.md): token management, JWT validation, 401/429 demos and upstream DDoS safeguards.
+- [docs/keycloak-realm.json](docs/keycloak-realm.json), [docs/keycloak-lab.yaml](docs/keycloak-lab.yaml) and [docs/jwt-protection-template.yaml](docs/jwt-protection-template.yaml): Keycloak and JWT manifests.
 - [RHCL-Parks-Demo-Guide.md](RHCL-Parks-Demo-Guide.md): advanced per-client limit, tracing, performance and WAF guidance.
 - [docs/API-Products-and-API-Keys.md](docs/API-Products-and-API-Keys.md): API discovery, product publishing, API key request/approval.
 - [docs/api-product.yaml](docs/api-product.yaml) and [docs/openapi.yaml](docs/openapi.yaml): Technology Preview APIProduct sample and OpenAPI description.
