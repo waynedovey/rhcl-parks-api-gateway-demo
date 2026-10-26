@@ -4,14 +4,18 @@ One copy/paste lab for **Red Hat Connectivity Link (RHCL) 1.4.3** on **OpenShift
 
 This is the **only README**. Run commands from the repository root unless stated otherwise. The app is a self-contained Python REST API with four Australian parks, **not** the original Parksmap UI/MongoDB application.
 
+**macOS/zsh tip:** Before pasting multi-line examples, run `setopt interactivecomments` so shell comment lines beginning `#` do not produce `zsh: command not found: #`. Use `read -rs VARIABLE` for hidden input on macOS; **do not use Bash's `read -p`** with zsh.
+
+**If you cloned this repo before the documentation update:** Check `git status --short` first. If you have no local changes, refresh your clone once with `git fetch origin` followed by `git merge --ff-only origin/main`. Keep any personal changes rather than overwriting them. The GitHub README may be newer than your Mac's local copy.
+
 ## Tick-the-box demo checklist
 
 - [ ] **Gateway:** Route → Gateway → Parks API; Gateway `Programmed=True`.
-- [ ] **Policies:** `parks-auth` and `parks-rate-limits` show `Accepted=True` **and** `Enforced=True`.
+- [ ] **Policies:** `parks-auth` shows `Accepted=True` and `Enforced=True`; `parks-rate-limits` is enforced **only when not overridden by a PlanPolicy**.
 - [ ] **HTTP status:** `200` valid key, `400` missing parameter, `401` missing key, `404` unknown park.
 - [ ] **Burst:** Bob `429` after 2 requests/10s; Alice `429` after 5 requests/10s.
 - [ ] **Sustained:** Alice `429` on the 16th request in a minute.
-- [ ] **API Product/Keys (Tech Preview):** Publish product → request key → manually approve → call API.
+- [ ] **API Product/Keys (Tech Preview):** Publish product → request key → confirm `APPROVED` → read key in zsh → call API.
 - [ ] **Keycloak:** OAuth2 client-credentials flow issues a 120-second signed JWT.
 - [ ] **JWT:** Valid token `200`, missing/expired token `401`; JWT policies `Accepted=True`/`Enforced=True`.
 - [ ] **JWT rate limits:** More than 5 calls/10s per authenticated subject → `429`.
@@ -23,7 +27,7 @@ This is the **only README**. Run commands from the repository root unless stated
 
 ## 1. Check OpenShift and RHCL prerequisites
 
-Requirements: logged-in `oc`, `curl`, permissions to create lab namespace/routing/policies. Optional JWT setup needs `openssl`, `sed`, `jq` and Red Hat registry image access. Token decoding commands below use macOS `base64 -D`.
+Requirements: logged-in `oc`, `curl`, permissions to create lab namespace/routing/policies. Optional JWT setup needs `openssl`, `sed`, `jq` and Red Hat registry image access. **The optional PlanPolicy backup in Section 4 also requires `jq`**. Token decoding commands below use macOS `base64 -D`.
 
 ```bash
 oc whoami
@@ -115,18 +119,18 @@ oc -n rhcl-parks-demo describe ratelimitpolicy parks-rate-limits
 ## 3. HTTP codes: 200, 400, 401, 404
 
 ```bash
-# 200 — valid API key / all parks
+printf '\nValid API key — expect 200\n'
 curl -k -i -H 'Authorization: APIKEY alice-parks-demo-key' \
   "$PARKS_URL/ws/data/all"
 
-# 400 — required name parameter missing
+printf '\nMissing name parameter — expect 400\n'
 curl -k -i -H 'Authorization: APIKEY alice-parks-demo-key' \
   "$PARKS_URL/ws/data/park"
 
-# 401 — no API key (Authorino rejection)
+printf '\nNo API key — expect 401 from Authorino\n'
 curl -k -i "$PARKS_URL/ws/info/"
 
-# 404 — unknown park
+printf '\nUnknown park — expect 404\n'
 curl -k -i -H 'Authorization: APIKEY alice-parks-demo-key' \
   "$PARKS_URL/ws/data/park?name=Atlantis"
 ```
@@ -140,6 +144,45 @@ curl -k -i -H 'Authorization: APIKEY alice-parks-demo-key' \
 | Alice | 5 | 15 |
 | Bob | 2 | 6 |
 | Benchmark | 10,000 | 100,000 |
+
+**Required preflight:** In your latest lab run, the policy reported:
+
+```text
+Accepted = True
+Enforced = False | Overridden |
+RateLimitPolicy is overridden by [rhcl-parks-demo/parks-plans]
+```
+
+That explains why **every Alice/Bob request returned 200**. The `parks-plans` **PlanPolicy** was attached to the same HTTPRoute and took precedence. The test below proves `429` **only if `parks-rate-limits` is actually Enforced=True**.
+
+```bash
+oc -n rhcl-parks-demo get planpolicy
+oc -n rhcl-parks-demo describe planpolicy parks-plans
+oc -n rhcl-parks-demo get ratelimitpolicy parks-rate-limits \
+  -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason} {.message}{"\n"}{end}'
+```
+
+**Pick ONE mode:**
+
+1. **Plan-tier demonstration:** Keep `parks-plans` and test its Bronze/Silver/Gold tier limits. See its `spec.plans` and statuses; **do not expect Alice/Bob's separate RateLimitPolicy counters to apply**. A plan-level quota may be shared across subscribers in a tier.
+2. **Original Alice/Bob demonstration:** Only if `parks-plans` belongs **exclusively to this disposable lab** and you can safely interrupt its tier policies, temporarily remove it. First make a *clean backup*, then delete the specifically named PlanPolicy:
+
+```bash
+oc -n rhcl-parks-demo get planpolicy parks-plans -o json \
+  | jq 'del(.status,.metadata.resourceVersion,.metadata.uid,.metadata.creationTimestamp,.metadata.generation,.metadata.managedFields)' \
+  > /tmp/rhcl-parks-plans-backup.json
+if [[ -s /tmp/rhcl-parks-plans-backup.json ]] && \
+   jq -e '.kind=="PlanPolicy" and .metadata.name=="parks-plans" and .metadata.namespace=="rhcl-parks-demo"' \
+      /tmp/rhcl-parks-plans-backup.json >/dev/null; then
+  oc -n rhcl-parks-demo delete planpolicy parks-plans
+  oc -n rhcl-parks-demo wait ratelimitpolicy/parks-rate-limits \
+    --for=condition=Enforced=True --timeout=180s
+else
+  echo 'STOP: PlanPolicy backup missing/invalid; nothing deleted.'
+fi
+```
+
+If you don't own `parks-plans`, **do not delete it**; ask the owner or use a separate lab route. **Run the Bob/Alice tests below only when `parks-rate-limits` is Enforced=True.** When done, use the restore commands at the end of this section. [RHCL PlanPolicy documentation](https://docs.redhat.com/en/documentation/red_hat_connectivity_link/1.4/html/deploy_red_hat_connectivity_link/rhcl-planpolicy).
 
 **Bob:** with fresh limits expect **2×200, then 6×429**.
 
@@ -179,6 +222,16 @@ curl -k -i -H 'Authorization: APIKEY alice-parks-demo-key' \
 
 Expected final `429`, assuming counters were fresh. These are **short + sustained windows**, not a token-bucket implementation.
 
+**Restore the plan after the Alice/Bob tests** (only if you backed it up and removed it above):
+
+```bash
+oc apply -f /tmp/rhcl-parks-plans-backup.json
+oc -n rhcl-parks-demo describe planpolicy parks-plans
+oc -n rhcl-parks-demo describe ratelimitpolicy parks-rate-limits
+```
+
+The original RateLimitPolicy will likely show `Overridden` again once `parks-plans` returns. That is **expected**; don't repeat Alice/Bob rate tests without checking which policy is active.
+
 ## 5. API Products & API Keys (Technology Preview)
 
 This optional module demonstrates **publishing an API → consumer request → owner approval → approved credential**. RHCL 1.4 API management is **Technology Preview**; publishing does not itself secure a route.
@@ -200,9 +253,11 @@ oc explain apiproduct.spec --api-version=devportal.kuadrant.io/v1alpha1
 oc apply --dry-run=server -f docs/api-product.yaml
 oc apply -f docs/api-product.yaml
 oc -n rhcl-parks-demo get apiproduct national-parks-api -o yaml
+oc -n rhcl-parks-demo get apiproduct national-parks-api \
+  -o jsonpath='{.spec.documentation.docsURL}{"\n"}'
 ```
 
-The Product `National Parks API v1.0.0` targets **HTTPRoute `rhcl-parks-demo/parks-api`**, uses [OpenAPI spec](docs/openapi.yaml), and requires **manual key approval**. If your Tech Preview CRD rejects a field, read the dry-run message and `oc explain`; don't force a CRD change.
+The Product `National Parks API v1.0.0` targets **HTTPRoute `rhcl-parks-demo/parks-api`**, uses [OpenAPI spec](docs/openapi.yaml), and requires **manual key approval**. The `docsURL` should now end in `/blob/main/README.md`, not the deleted `docs/API-Products-and-API-Keys.md`; if it is still old, refresh your local clone and reapply **only** `docs/api-product.yaml`. If your Tech Preview CRD rejects a field, read the dry-run message and `oc explain`; don't force a CRD change.
 
 ### 5C. Request, approve, test and revoke a key
 
@@ -211,26 +266,36 @@ The Product `National Parks API v1.0.0` targets **HTTPRoute `rhcl-parks-demo/par
 3. Switch to **`rhcl-parks-demo`** → **API Key Approvals** → inspect and **Approve**.
 4. Switch back to `rhcl-parks-consumer` → **My API Keys** → open the approved key → **Show API Key**.
 
+**Stop if the request has not actually been approved.** In your last output the `APPROVED` column for `test-key` was blank, and no APIKeyApproval was listed. Review the request in the owner namespace before testing the data plane.
+
 Observe request/approval objects without exposing credentials:
 
 ```bash
 oc -n rhcl-parks-demo get apikeyrequests,apikeyapprovals
 oc -n rhcl-parks-consumer get apikeys
+oc -n rhcl-parks-consumer describe apikey test-key
 ```
 
 Copy the newly approved credential to your terminal without putting its value in shell history:
 
 ```bash
-read -r -s -p 'Approved Parks API key: ' PARKS_API_KEY
-echo
-curl -k -i -H "Authorization: APIKEY $PARKS_API_KEY" \
-  "$PARKS_URL/ws/data/all"
+printf 'Approved Parks API key: '
+read -rs PARKS_API_KEY
+printf '\n'
+if [[ -z "$PARKS_API_KEY" ]]; then
+  printf 'STOP: no API key was entered. Check approval and retry.\n'
+else
+  curl -k -i -H "Authorization: APIKEY $PARKS_API_KEY" \
+    "$PARKS_URL/ws/data/all"
+fi
 unset PARKS_API_KEY
 ```
 
+If you chose a key name other than `test-key`, substitute your own name in the `describe` command.
+
 **Expected 200 requires the actual generated Secret to be discoverable by `parks-auth`**, including its namespace, `app: parks-api` label and the `APIKEY` prefix. If it returns `401`, inspect the managed Secret's **metadata**, not its value; API Product approval does not automatically fix the data-plane policy. Revoke the approved key in the console, then confirm denial.
 
-Separate-team RBAC can use the documented `api-catalog-browser`, `api-consumer` and `api-owner` roles; a cluster-admin demo does **not** prove tenant separation. The repo includes **no PlanPolicy/subscription tiers**; consumer keys do not automatically receive Bob/Alice quotas.
+Separate-team RBAC can use the documented `api-catalog-browser`, `api-consumer` and `api-owner` roles; a cluster-admin demo does **not** prove tenant separation. The repo does not ship a PlanPolicy manifest, but your cluster **does** have `parks-plans`. This active plan policy overrides Alice/Bob's original rate-limit demo; inspect its tier configuration separately. New consumer keys do not automatically inherit Bob/Alice quotas.
 
 ## 6. JWT validation with Red Hat build of Keycloak
 
@@ -254,26 +319,34 @@ export KC_URL="https://$(oc -n rhcl-parks-demo get route parks-keycloak -o jsonp
 export PARKS_URL="https://$(oc -n rhcl-parks-demo get route parks-api-gateway -o jsonpath='{.spec.host}')"
 echo "$KC_URL"
 
-# macOS: get the lab admin password locally for the Keycloak console
 oc -n rhcl-parks-demo get secret parks-keycloak-bootstrap \
   -o jsonpath='{.data.password}' | base64 -D
 echo
 ```
 
-Open `$KC_URL`, log in as **admin**, select the **parks** realm, then **Clients → parks-demo-client → Credentials → Client secret**. **Client secret ≠ admin password.**
+Open `$KC_URL`, log in as **admin**, select the **parks** realm, then **Clients → parks-demo-client**. Verify:
+
+- **Client authentication: On**.
+- **Service accounts roles: enabled** (required for the `client_credentials` grant).
+- **Credentials → Client secret** is the **current** secret for `parks-demo-client`.
+
+**Client secret ≠ admin password.** Your latest run returned `unauthorized_client` / `Invalid client or Invalid client credentials`: **fix that at Keycloak before running any JWT API calls**. This lab uses Keycloak development mode with ephemeral data. A restart may recreate its client secret, so an earlier working secret can go stale. Never paste the admin password or JWT in shared logs; if you already shared the lab admin password, rotate it in Keycloak.
 
 In a terminal, paste the client secret without displaying it:
 
 ```bash
+printf 'Paste current parks-demo-client secret: '
 read -rs KC_CLIENT_SECRET
-# Paste secret, press Enter; input is not echoed.
-echo
-test -n "$KC_CLIENT_SECRET" && echo 'Client secret captured'
+printf '\n'
+if [[ -z "$KC_CLIENT_SECRET" ]]; then
+  echo 'STOP: client secret is blank. Copy it from Keycloak Credentials.'
+fi
 ```
 
 ### 6C. Request a signed token (120-second lifetime)
 
 ```bash
+unset ACCESS_TOKEN
 TOKEN_JSON="$(curl -ksS -X POST \
   "$KC_URL/realms/parks/protocol/openid-connect/token" \
   -d grant_type=client_credentials \
@@ -283,10 +356,14 @@ TOKEN_JSON="$(curl -ksS -X POST \
 printf '%s\n' "$TOKEN_JSON" | jq '{error, error_description, expires_in, token_type}'
 ACCESS_TOKEN="$(printf '%s' "$TOKEN_JSON" | jq -r '.access_token // empty')"
 unset KC_CLIENT_SECRET TOKEN_JSON
-test -n "$ACCESS_TOKEN" && echo 'JWT received'
+if [[ -z "$ACCESS_TOKEN" ]]; then
+  echo 'STOP: no JWT issued. Fix Keycloak client auth/secret before Section 6D.'
+else
+  echo 'JWT received; run Section 6D immediately (120s token lifetime).'
+fi
 ```
 
-Expected: no error, `token_type: "Bearer"`, `expires_in: 120`. If token issuance fails, the `parks-demo-client` secret or service-account configuration may be wrong. **Do not paste the JWT or client secret into tickets/GitHub/chat.**
+Expected: no error, `token_type: "Bearer"`, `expires_in: 120` and the message **JWT received**. **If you see `unauthorized_client`, `invalid_client`, or `STOP`, do not run Section 6D:** an empty bearer token produces `401` every time, which proves nothing about JWT validation. Recheck Keycloak's client secret, authentication switch and service-account setting. **Do not paste the JWT or client secret into tickets/GitHub/chat.**
 
 Optional: decode *selected claims* for display (decoding is **not validation**):
 
@@ -300,33 +377,37 @@ Check `iss` matches `$KC_URL/realms/parks`, `aud` includes `parks-api` and `exp 
 
 ### 6D. Prove 200, 401 and 429
 
-Run as soon as a **fresh token** is obtained:
+**Prerequisite:** Section 6C must have printed **JWT received**, and `ACCESS_TOKEN` must not be empty. Run immediately after issuance (the token expires in **120 seconds**); rerun Section 6B–6C if needed. A blank or expired token makes all eight attempts return `401`, **not** a meaningful `429` demonstration.
 
 ```bash
-# 200: valid JWT
-curl -k -i -H "Authorization: Bearer $ACCESS_TOKEN" \
-  "$PARKS_URL/jwt/ws/data/all"
-
-# 401: missing JWT
-curl -k -i "$PARKS_URL/jwt/ws/data/all"
-
-# 401: wrong authorization scheme
-curl -k -i -H 'Authorization: APIKEY alice-parks-demo-key' \
-  "$PARKS_URL/jwt/ws/data/all"
-
-# 429: per-subject quota is 5 requests/10 seconds
-for i in {1..8}; do
-  curl -k -sS -o /dev/null -w "JWT $i: HTTP %{http_code}\n" \
-    -H "Authorization: Bearer $ACCESS_TOKEN" \
+if [[ -z "$ACCESS_TOKEN" ]]; then
+  echo 'STOP: ACCESS_TOKEN is empty. Fix Keycloak and repeat Section 6C.'
+else
+  printf '\nValid JWT — expect 200\n'
+  curl -k -i -H "Authorization: Bearer $ACCESS_TOKEN" \
     "$PARKS_URL/jwt/ws/data/all"
-done
 
-# Original API-key path still works separately
-curl -k -i -H 'Authorization: APIKEY alice-parks-demo-key' \
-  "$PARKS_URL/ws/data/all"
+  printf '\nMissing JWT — expect 401\n'
+  curl -k -i "$PARKS_URL/jwt/ws/data/all"
+
+  printf '\nWrong authorization scheme — expect 401\n'
+  curl -k -i -H 'Authorization: APIKEY alice-parks-demo-key' \
+    "$PARKS_URL/jwt/ws/data/all"
+
+  printf '\n8 rapid JWT calls — expect 429 after initial 200s\n'
+  for i in {1..8}; do
+    curl -k -sS -o /dev/null -w "JWT $i: HTTP %{http_code}\n" \
+      -H "Authorization: Bearer $ACCESS_TOKEN" \
+      "$PARKS_URL/jwt/ws/data/all"
+  done
+
+  printf '\nOriginal API-key path — expect 200\n'
+  curl -k -i -H 'Authorization: APIKEY alice-parks-demo-key' \
+    "$PARKS_URL/ws/data/all"
+fi
 ```
 
-JWT limits: **5/10s per `sub`**, **20/min per `sub`**, **60/min aggregate**. Prior calls can consume quota, so the eight rapid responses may contain fewer than five initial `200`. After 120 seconds, the old token should yield `401`; **issue a new token for another 429 test**.
+JWT limits: **5/10s per `sub`**, **20/min per `sub`**, **60/min aggregate**. Confirm `parks-jwt-auth` and `parks-jwt-rate-limits` are both `Accepted=True` and `Enforced=True`; they were healthy in the most recent run. Prior calls can consume quota, so the eight rapid responses may contain fewer than five initial `200`. After 120 seconds, the old token should yield `401`; **issue a new token for another 429 test**.
 
 ### 6E. What Keycloak/RHCL validates and manages
 
@@ -349,7 +430,7 @@ hey -n 1000 -c 10 \
   "$PARKS_URL/ws/data/all"
 ```
 
-Record requests/second, errors, p50/p95/p99. The benchmark identity has a deliberately high quota. **`hey` does not use `curl -k`**: fix certificate trust or configure your benchmarking tool's TLS settings explicitly for lab testing.
+Record requests/second, errors, p50/p95/p99. The benchmark identity has a deliberately high quota. **If `parks-plans` currently overrides the original RateLimitPolicy, this tests the active plan-policy configuration, not Alice/Bob's configured quotas.** **`hey` does not use `curl -k`**: fix certificate trust or configure your benchmarking tool's TLS settings explicitly for lab testing.
 
 For a *rough* backend baseline, open a second terminal with:
 
