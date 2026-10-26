@@ -78,7 +78,7 @@ export BENCH_KEY=benchmark-parks-demo-key
 echo "$PARKS_URL"
 ```
 
-The browser should also reach `$PARKS_URL/ws/info/` once authentication is configured; browsers without an API key should receive an authentication error. If the cluster's router certificate isn't trusted, `curl -k` may be used **in this lab only**.
+The browser should also reach `$PARKS_URL/ws/info/` once authentication is configured; browsers without an API key should receive an authentication error. Your Mac reported an untrusted Route certificate, so the HTTPS curl examples below use `-k` / `--insecure`. **This skips TLS server verification and is for this controlled lab only.** For real workloads, trust the cluster CA and use `curl --cacert /path/to/ca.pem` (or install a trusted Route certificate). See [curl's TLS certificate guide](https://curl.se/docs/sslcerts.html).
 
 These are **public example lab credentials** embedded in the YAML for convenience. Never use them for real systems or leave them exposed as a production API.
 
@@ -87,7 +87,7 @@ These are **public example lab credentials** embedded in the YAML for convenienc
 ### 200 — valid API request
 
 ```bash
-curl -i -H "Authorization: APIKEY $ALICE_KEY" \
+curl -k -i -H "Authorization: APIKEY $ALICE_KEY" \
   "$PARKS_URL/ws/data/all"
 ```
 
@@ -96,7 +96,7 @@ Expected: `HTTP 200`, JSON containing four national parks.
 ### 400 — missing required application parameter
 
 ```bash
-curl -i -H "Authorization: APIKEY $ALICE_KEY" \
+curl -k -i -H "Authorization: APIKEY $ALICE_KEY" \
   "$PARKS_URL/ws/data/park"
 ```
 
@@ -105,7 +105,7 @@ Expected: `HTTP 400` and `name query parameter is required`. This `400` is gener
 ### 401 — missing API key
 
 ```bash
-curl -i "$PARKS_URL/ws/info/"
+curl -k -i "$PARKS_URL/ws/info/"
 ```
 
 Expected: unauthorized (normally `HTTP 401`). This response is enforced by RHCL/Authorino.
@@ -113,7 +113,7 @@ Expected: unauthorized (normally `HTTP 401`). This response is enforced by RHCL/
 ### 404 — nonexistent resource
 
 ```bash
-curl -i -H "Authorization: APIKEY $ALICE_KEY" \
+curl -k -i -H "Authorization: APIKEY $ALICE_KEY" \
   "$PARKS_URL/ws/data/park?name=Atlantis"
 ```
 
@@ -133,7 +133,7 @@ The deployed `RateLimitPolicy` has independent identity-based counters:
 
 ```bash
 for i in $(seq 1 8); do
-  curl -sS -o /dev/null -w "Bob request $i: %{http_code}\n" \
+  curl -k -sS -o /dev/null -w "Bob request $i: %{http_code}\n" \
     -H "Authorization: APIKEY $BOB_KEY" \
     "$PARKS_URL/ws/data/all"
 done
@@ -145,7 +145,7 @@ On fresh counters, expect two `200`s followed by `429`s. Alice has a separate co
 
 ```bash
 for i in $(seq 1 8); do
-  curl -sS -o /dev/null -w "Alice request $i: %{http_code}\n" \
+  curl -k -sS -o /dev/null -w "Alice request $i: %{http_code}\n" \
     -H "Authorization: APIKEY $ALICE_KEY" \
     "$PARKS_URL/ws/data/all"
 done
@@ -160,7 +160,7 @@ After allowing old demo counters to expire (at least 65 seconds is convenient), 
 ```bash
 for batch in 1 2 3; do
   for i in $(seq 1 5); do
-    curl -sS -o /dev/null -w "%{http_code} " \
+    curl -k -sS -o /dev/null -w "%{http_code} " \
         -H "Authorization: APIKEY $ALICE_KEY" \
       "$PARKS_URL/ws/info/"
   done
@@ -168,7 +168,7 @@ for batch in 1 2 3; do
   sleep 11
 done
 
-curl -i -H "Authorization: APIKEY $ALICE_KEY" \
+curl -k -i -H "Authorization: APIKEY $ALICE_KEY" \
   "$PARKS_URL/ws/info/"
 ```
 
