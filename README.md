@@ -24,17 +24,22 @@ The runner is **read-only for Kubernetes resources**: it checks Gateway/HTTPRout
 - **Skip latency probes:** add `--no-perf`.
 - **TLS:** the default uses `curl -k` for this lab's untrusted Route certificate. Use `VERIFY_TLS=1 bash scripts/test-all.sh` when your certificates are trusted.
 
-It prints one **PASS / FAIL / SKIP** line per check and a final count; exits nonzero when checks fail. **SKIP is not a PASS.** Importantly, if `parks-plans` overrides `parks-rate-limits`, it reports the policy issue and **skips** the original Alice/Bob quota tests; it **does not delete or change `parks-plans`**. Read Section 4 if you want to test those quotas.
+It prints one **PASS / FAIL / SKIP** line per check and a final count; exits nonzero when checks fail. **SKIP is not a PASS.** The runner detects which rate-limiting policy is active:
+
+- **PlanPolicy mode (your current cluster):** verifies that `parks-rate-limits` was intentionally overridden **and** that `parks-plans` is Accepted/Enforced on `parks-api`. It lists the configured Bronze/Silver/Gold daily quotas, but **does not claim that a daily HTTP 429 has been demonstrated**. It skips Alice/Bob's inactive burst tests and a daily-limit exhaustion test, preserving subscriber quota.
+- **Original RateLimitPolicy mode:** verifies `parks-rate-limits` is Enforced and runs Alice/Bob 10-second `429` checks (plus Alice 15/min on a full run).
+- An override without a healthy matching PlanPolicy is still a **FAIL**. The script **never deletes or changes Kubernetes resources**. See Section 4 if you want to switch modes.
 
 **External WAF/DDoS and actual OpenTelemetry trace correlation** are explicitly `SKIP` because the repository doesn't provision these integrations. The known malformed-JWT `504` test is deliberately omitted.
 
 ## Tick-the-box demo checklist
 
 - [ ] **Gateway:** Route → Gateway → Parks API; Gateway `Programmed=True`.
-- [ ] **Policies:** `parks-auth` shows `Accepted=True` and `Enforced=True`; `parks-rate-limits` is enforced **only when not overridden by a PlanPolicy**.
+- [ ] **Policies:** `parks-auth` is Enforced and **one** API rate limiter is Enforced: `parks-plans` (current configuration) or `parks-rate-limits` (original demo).
 - [ ] **HTTP status:** `200` valid key, `400` missing parameter, `401` missing key, `404` unknown park.
-- [ ] **Burst:** Bob `429` after 2 requests/10s; Alice `429` after 5 requests/10s.
-- [ ] **Sustained:** Alice `429` on the 16th request in a minute.
+- [ ] **Plans (current):** Bronze 100/day, Silver 500/day, Gold 1,000/day are configured; optional separate bounded test proves a tier's `429`.
+- [ ] **Burst (original mode only):** Bob `429` after 2 requests/10s; Alice `429` after 5 requests/10s.
+- [ ] **Sustained (original mode only):** Alice `429` on the 16th request in a minute.
 - [ ] **API Product/Keys (Tech Preview):** Publish product → request key → confirm `APPROVED` → read key in zsh → call API.
 - [ ] **Keycloak:** OAuth2 client-credentials flow issues a 120-second signed JWT.
 - [ ] **JWT:** Valid token `200`, missing/expired token `401`; JWT policies `Accepted=True`/`Enforced=True`.
@@ -132,7 +137,7 @@ oc -n rhcl-parks-demo describe authpolicy parks-auth
 oc -n rhcl-parks-demo describe ratelimitpolicy parks-rate-limits
 ```
 
-**Both policies must have `Accepted=True` and `Enforced=True` before testing security.** A `200` alone proves only routing, not authentication.
+**The AuthPolicy and the active rate-limiting policy must be `Accepted=True` and `Enforced=True`.** In plan-tier mode, `parks-plans` is Enforced and the original `parks-rate-limits` is intentionally `Overridden`; this is healthy. A `200` alone proves only routing, not authentication.
 
 > **Lab TLS:** All `curl` examples use `-k` because this sandbox Route certificate is untrusted by the Mac. `-k` skips server verification; **do not use it in production**. Use a trusted certificate or `curl --cacert`. See [curl TLS certificate guidance](https://curl.se/docs/sslcerts.html).
 
@@ -157,7 +162,19 @@ curl -k -i -H 'Authorization: APIKEY alice-parks-demo-key' \
 
 `400` and `404` originate in the sample application and pass through the gateway; `401` comes from RHCL authorization. The API keys in the YAML are **public demo-only** strings.
 
-## 4. Per-client burst and sustained limits: HTTP 429
+## 4. Choose the active rate-limit test
+
+Your cluster currently enforces **PlanPolicy `parks-plans`**, targeted at HTTPRoute `parks-api`. Its observed configuration is:
+
+| API plan | Requests per day |
+| --- | ---: |
+| Bronze | 100 |
+| Silver | 500 |
+| Gold | 1,000 |
+
+The tier is selected using the approved consumer Secret annotation `secret.kuadrant.io/plan-id`. The `test-key` APIKey requests **Bronze**. These are **daily plan quotas**, not the 10-second or 1-minute limits from the original example. Plan quotas may be shared by a tier; do not run enough requests to exhaust them on a shared demo just to produce a `429`. The automated test checks that the PlanPolicy is Enforced and lists tiers, **not that a daily quota has been exhausted**.
+
+For comparison, the original **`parks-rate-limits`** (inactive while the PlanPolicy applies) defines:
 
 | Client | Per 10 seconds | Per minute |
 | --- | ---: | ---: |
@@ -165,7 +182,7 @@ curl -k -i -H 'Authorization: APIKEY alice-parks-demo-key' \
 | Bob | 2 | 6 |
 | Benchmark | 10,000 | 100,000 |
 
-**Required preflight:** In your latest lab run, the policy reported:
+Its status on the current cluster is expected to show:
 
 ```text
 Accepted = True
@@ -173,7 +190,7 @@ Enforced = False | Overridden |
 RateLimitPolicy is overridden by [rhcl-parks-demo/parks-plans]
 ```
 
-That explains why **every Alice/Bob request returned 200**. The `parks-plans` **PlanPolicy** was attached to the same HTTPRoute and took precedence. The test below proves `429` **only if `parks-rate-limits` is actually Enforced=True**.
+This is **not a broken rate limiter** when `parks-plans` itself is Enforced. The Alice/Bob test below proves `429` **only if you deliberately switch to the original RateLimitPolicy mode**.
 
 ```bash
 oc -n rhcl-parks-demo get planpolicy
@@ -184,7 +201,7 @@ oc -n rhcl-parks-demo get ratelimitpolicy parks-rate-limits \
 
 **Pick ONE mode:**
 
-1. **Plan-tier demonstration:** Keep `parks-plans` and test its Bronze/Silver/Gold tier limits. See its `spec.plans` and statuses; **do not expect Alice/Bob's separate RateLimitPolicy counters to apply**. A plan-level quota may be shared across subscribers in a tier.
+1. **Plan-tier demonstration (recommended for your current lab):** Keep `parks-plans` and demonstrate the Bronze/Silver/Gold configuration, approved `test-key` and HTTP `200`, plus the policy's `Enforced=True` status. **Do not expect Alice/Bob's separate RateLimitPolicy counters to apply.** The default script intentionally does **not** exhaust a daily tier allowance to test `429`; use a disposable low-quota tier in a dedicated namespace if you need a proof of enforcement.
 2. **Original Alice/Bob demonstration:** Only if `parks-plans` belongs **exclusively to this disposable lab** and you can safely interrupt its tier policies, temporarily remove it. First make a *clean backup*, then delete the specifically named PlanPolicy:
 
 ```bash
@@ -286,7 +303,7 @@ The Product `National Parks API v1.0.0` targets **HTTPRoute `rhcl-parks-demo/par
 3. Switch to **`rhcl-parks-demo`** → **API Key Approvals** → inspect and **Approve**.
 4. Switch back to `rhcl-parks-consumer` → **My API Keys** → open the approved key → **Show API Key**.
 
-**Stop if the request has not actually been approved.** In your last output the `APPROVED` column for `test-key` was blank, and no APIKeyApproval was listed. Review the request in the owner namespace before testing the data plane.
+**Your verified consumer key is working:** `rhcl-parks-consumer/test-key` now reports `Approved=True` and returns **HTTP 200** with its current 64-character secret. Its owner-side APIKeyApproval is valid and approved. If testing a **new** request, wait for that new key's `Approved=True` before testing the data plane.
 
 Observe request/approval objects without exposing credentials:
 
@@ -313,9 +330,37 @@ unset PARKS_API_KEY
 
 If you chose a key name other than `test-key`, substitute your own name in the `describe` command.
 
-**Expected 200 requires the actual generated Secret to be discoverable by `parks-auth`**, including its namespace, `app: parks-api` label and the `APIKEY` prefix. If it returns `401`, inspect the managed Secret's **metadata**, not its value; API Product approval does not automatically fix the data-plane policy. Revoke the approved key in the console, then confirm denial.
+**Expected 200 requires Authorino to discover the generated enforcement Secret.** This is **not** the consumer's `rhcl-parks-consumer/test-key-secret`: that Secret may have no labels. The Developer Portal controller creates a separate managed Secret in `openshift-operators`. Authorino's `parks-auth` policy selects `app: parks-api` across namespaces. The working configuration uses `selector.matchLabels` (not just `matchExpressions`) so newly generated managed Secrets receive the expected application label.
 
-Separate-team RBAC can use the documented `api-catalog-browser`, `api-consumer` and `api-owner` roles; a cluster-admin demo does **not** prove tenant separation. The repo does not ship a PlanPolicy manifest, but your cluster **does** have `parks-plans`. This active plan policy overrides Alice/Bob's original rate-limit demo; inspect its tier configuration separately. New consumer keys do not automatically inherit Bob/Alice quotas.
+Check the policy and the managed Secret's **metadata only** (these commands do not reveal key material):
+
+```bash
+oc -n rhcl-parks-demo get authpolicy parks-auth -o json \
+  | jq '.spec.rules.authentication["api-key-users"].apiKey'
+oc -n openshift-operators get secret \
+  -l devportal.kuadrant.io/apikey=test-key,devportal.kuadrant.io/apikey-namespace=rhcl-parks-consumer \
+  --show-labels
+oc -n rhcl-parks-consumer get apikey test-key \
+  -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}{"\n"}{end}'
+```
+
+If an **already generated** managed Secret lacks `app=parks-api`, inspect its exact name and, **only for your demo's specific enforcement Secret**, repair its label:
+
+```bash
+ENFORCEMENT_SECRET="$(oc -n openshift-operators get secret \
+  -l devportal.kuadrant.io/apikey=test-key,devportal.kuadrant.io/apikey-namespace=rhcl-parks-consumer \
+  -o jsonpath='{.items[0].metadata.name}')"
+if [[ -n "$ENFORCEMENT_SECRET" ]]; then
+  oc -n openshift-operators label secret "$ENFORCEMENT_SECRET" \
+    app=parks-api --overwrite
+else
+  echo 'STOP: managed enforcement Secret not found'
+fi
+```
+
+This manual label repair was needed once in the current lab and changed the consumer call from **401 to 200**. It is not a substitute for a correct `AuthPolicy` selector and approved-product workflow. Do **not** copy the consumer Secret into the app namespace or print it to troubleshoot.
+
+Separate-team RBAC can use the documented `api-catalog-browser`, `api-consumer` and `api-owner` roles; a cluster-admin demo does **not** prove tenant separation. The repo does not ship a PlanPolicy manifest; your cluster has a working `parks-plans` that overrides the original Alice/Bob quotas.
 
 ## 6. JWT validation with Red Hat build of Keycloak
 
@@ -515,9 +560,9 @@ oc -n rhcl-parks-demo logs deployment/parks-api --tail=60
 | API responds `200` **without** required key/token | **Stop** — bypass or unenforced AuthPolicy; no security demo until fixed. |
 | `404` | Route, Gateway listener and HTTPRoute hostnames must agree; rerun `scripts/expose-route.sh`. |
 | `503` | Gateway `Programmed=True` and backend endpoints/Pods Ready. |
-| No `429` | Policy `Enforced=True`, correct authenticated identity and fresh counters. |
+| No `429` | Check **which** policy is active. `parks-plans` daily tiers do not produce Alice/Bob 10-second `429`; JWT per-subject `429` is demonstrated on `/jwt/ws/data/all`. |
 | API Products absent from console | Enable `kuadrant-console-plugin`; inspect `devportal.kuadrant.io` CRDs. |
-| Approved API Product key yields `401` | Check generated Secret labels/namespace, `parks-auth` selector, `APIKEY` prefix. |
+| Approved API Product key yields `401` | Check the `openshift-operators` **managed enforcement Secret** has `app=parks-api`, `parks-auth` uses `matchLabels`, and the header prefix is `APIKEY`. See §5C. |
 | Keycloak `invalid_client` | The OAuth **client** secret is different from the bootstrap admin password. |
 | JWT `403` | Compare actual token `iss` and `aud` to Keycloak Route and `parks-api`. |
 | JWT loop returns only `401` | Token TTL is just 120 seconds; issue a fresh token. |
