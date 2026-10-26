@@ -22,6 +22,8 @@ The new `parks-jwt` HTTPRoute matches only `/jwt` and its subpaths. Gateway API 
 - API key: `$PARKS_URL/ws/data/all`
 - JWT: `$PARKS_URL/jwt/ws/data/all`
 
+**API Products:** The existing `national-parks-api` APIProduct still targets `parks-api` and therefore remains an API-key product. It will not automatically display this new route's JWT scheme. If you want JWT discovery in the RHCL catalog, create a **separate** APIProduct targeting `parks-jwt` after its AuthPolicy is enforced; do not repoint the existing product and disrupt its API-key demo.
+
 **Do not reapply `rhcl-parks-demo.yaml` as part of this module.** The existing base YAML contains an example gateway hostname; the Route setup script has already patched the hostname for the live gateway. The JWT HTTPRoute deliberately omits `hostnames` and inherits the live Gateway listener hostname.
 
 ## 1. Deploy or reuse Red Hat build of Keycloak
