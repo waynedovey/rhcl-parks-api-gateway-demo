@@ -1,0 +1,27 @@
+# RHCL / Kuadrant application-layer abuse controls, NOT volumetric DDoS protection.
+# A valid JWT is authenticated by parks-jwt-auth before client identity is used here.
+apiVersion: kuadrant.io/v1
+kind: RateLimitPolicy
+metadata:
+  name: parks-jwt-rate-limits
+  namespace: rhcl-parks-demo
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: parks-jwt
+  limits:
+    per-jwt-client:
+      rates:
+        - limit: 5
+          window: 10s
+        - limit: 30
+          window: 1m
+      counters:
+        - expression: auth.identity.sub
+    jwt-route-aggregate:
+      rates:
+        - limit: 100
+          window: 10s
+        - limit: 300
+          window: 1m
