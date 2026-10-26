@@ -1,58 +1,79 @@
 # Red Hat Connectivity Link — National Parks API Gateway Demo
 
-An easy, hands-on lab showing how **Red Hat Connectivity Link (RHCL)** protects an API on **Red Hat OpenShift**.
+Demonstrate API gateway capabilities using **RHCL 1.4.3** on **OpenShift 4.22.18** and a small, self-contained Parks API.
 
-**Target versions:** RHCL Operator **1.4.3** and OpenShift **4.22.18**.
+**Use an OpenShift HTTPS Route**: no local port-forwarding or custom DNS records needed to run the gateway demos.
 
-> The sample Parks API and its HTTP endpoints were tested locally, and the Kubernetes YAML was checked for syntax errors. The RHCL resources still need to be applied and validated on your cluster.
+## What this lab demonstrates
 
-## What will I demonstrate?
-
-| Requirement | Live demo | Expected outcome |
+| Requirement | Demo | Expected result |
 | --- | --- | --- |
-| API response codes | Valid, invalid, and unauthorized requests | `200`, `400`, `401`, `404` |
-| Per-client rate limiting | Different limits for Alice and Bob | `429` when a client's limit is exceeded |
-| Burst + sustained limits | Multiple time windows per client | 10-second and 1-minute limits |
-| OpenTelemetry tracing | Connect RHCL to an OTel/Tempo backend | Gateway and policy traces (extra setup) |
-| Low latency | Compare direct API with gateway | p50/p95/p99 benchmark |
-| WAF integration | Place a chosen WAF before RHCL | Separate WAF block and RHCL enforcement (extra setup) |
+| HTTP status codes | Valid request, missing parameter, missing API key, unknown park | 200, 400, 401, 404 |
+| Per-client burst limits | Bob: 2 requests per 10s; Alice: 5 per 10s | 429 after allowance |
+| Per-client sustained limits | Bob: 6/min; Alice: 15/min | 429 after allowance |
+| OTel tracing | Optional observability stack setup | Trace gateway/policy requests (not preconfigured) |
+| Performance | Benchmark the HTTPS Route | p50/p95/p99; extra baseline steps in advanced guide |
+| WAF integration | Optional upstream WAF | WAF block + RHCL 401/429 (not preconfigured) |
 
-## What gets deployed?
+## Architecture
 
 ```text
-                   Gateway: parks-gw
-Client --------->  Host: parks-api.example.test
-                   RHCL / Envoy Gateway
-                     |  AuthPolicy (API key)
-                     |  RateLimitPolicy (per client)
-                     v
-                   parks-api Service
-                     |
-                     v
-                   Parks API Pod (Python)
+Client --HTTPS--> OpenShift Route (edge TLS)
+                    |
+                    v
+              Gateway Service
+              parks-gw-openshift-default
+                    |
+                    v
+              Gateway + HTTPRoute
+              (RHCL AuthPolicy / RateLimitPolicy)
+                    |
+                    v
+                parks-api Service
+                    |
+                    v
+                Parks API Pod
 ```
 
-Everything is contained in the namespace **`rhcl-parks-demo`**. This is a small, self-contained National Parks-themed API. It uses the familiar `/ws/info/` and `/ws/data/all` endpoints, but **does not require MongoDB and is not the original Parksmap UI**.
+**Important:** The Route must point to the **Gateway Service**, not directly to `parks-api`. Sending traffic straight to the application would bypass RHCL policy enforcement.
 
-## 1. Prerequisites
+This is a small Parks-themed API with `/ws/info/` and `/ws/data/all` endpoints; it does not require MongoDB or include the original Parksmap UI.
 
-- OpenShift 4.22 cluster access and the `oc` CLI, logged in as an administrator.
-- RHCL Operator 1.4.3 installed **and a ready `Kuadrant` instance** with Authorino and Limitador.
-- OpenShift native Gateway API enabled with the `openshift-default` GatewayClass.
-
-Verify:
+## 1. Check prerequisites
 
 ```bash
 oc whoami
 oc get clusterversion
+oc get csv -A | grep rhcl-operator
 oc get kuadrant -A
 oc get authorino,limitador -A
 oc get gatewayclass openshift-default
 ```
 
-**If there is no `Kuadrant` instance:** create it in the OpenShift console under **Ecosystem → Installed Operators → Red Hat Connectivity Link → Kuadrant → Create Kuadrant**. Installing the Operator CSV alone is not enough.
+You need:
 
-**If `openshift-default` does not exist:** enable the built-in Gateway controller (requires `cluster-admin`):
+- A working OpenShift cluster and `oc` login.
+- The RHCL Operator **and a Ready `Kuadrant` instance** with Authorino and Limitador. The Operator alone is insufficient.
+- OpenShift's native `openshift-default` GatewayClass, with `Accepted=True`.
+
+**Missing Kuadrant?** In **Ecosystem → Installed Operators → Red Hat Connectivity Link → Kuadrant → Create Kuadrant**, create the instance in the **same namespace where the RHCL Operator is installed**. Or, if the Operator is installed in `kuadrant-system`:
+
+```bash
+oc -n kuadrant-system apply -f - <<'EOF'
+apiVersion: kuadrant.io/v1beta1
+kind: Kuadrant
+metadata:
+  name: kuadrant
+spec: {}
+EOF
+
+oc -n kuadrant-system wait kuadrant/kuadrant \
+  --for=condition=Ready=True --timeout=300s
+```
+
+Replace `kuadrant-system` if your Operator lives in another namespace. Reuse a healthy existing Kuadrant instance—do not create duplicates.
+
+**Missing GatewayClass?** An administrator can enable OpenShift's built-in controller:
 
 ```bash
 oc apply -f - <<'EOF'
@@ -65,166 +86,146 @@ spec:
 EOF
 ```
 
-Wait until `oc get gatewayclass openshift-default -o yaml` shows the controller is accepted. Leave any existing working GatewayClass untouched.
+## 2. Deploy the sample API and RHCL policies
 
-## 2. Deploy the Parks API and RHCL policies
-
-Download or clone this repository, open a terminal in its directory, then run:
+Clone the repository, then:
 
 ```bash
 oc apply -f rhcl-parks-demo.yaml
 oc -n rhcl-parks-demo rollout status deployment/parks-api --timeout=180s
-oc -n rhcl-parks-demo get pods,svc,gateway,httproute,authpolicy,ratelimitpolicy
+oc -n rhcl-parks-demo get gateway,httproute,pods,svc,authpolicy,ratelimitpolicy
 ```
 
-Check that:
+The gateway should reach `Programmed=True`. The native Gateway controller generates a Service called `parks-gw-openshift-default` in this OpenShift 4.22 setup.
 
-- The `parks-api` pod is **Running/Ready**.
-- `parks-gw` is **Programmed=True**.
-- The `parks-api` HTTPRoute is **Accepted=True**.
-- `parks-auth` and `parks-rate-limits` are **Accepted=True** and **Enforced=True**.
+## 3. Create the HTTPS Route
 
-No DNS registration or TLS certificate is required for the local test. The hostname is supplied as an HTTP `Host` header.
-
-## 3. Open a connection to the API gateway
-
-Open a **separate terminal window** and leave this running:
+Run **after** the Gateway is created:
 
 ```bash
-oc -n rhcl-parks-demo port-forward svc/parks-gw 18080:80
+bash scripts/expose-route.sh
 ```
 
-> If the Service is missing, check `oc -n rhcl-parks-demo get gateway parks-gw -o yaml` and `oc -n rhcl-parks-demo get svc` first. Do not continue until the Gateway is programmed.
+The script:
 
-Use a **second terminal** for the API tests below.
+1. Creates an edge-TLS OpenShift Route pointing at `parks-gw-openshift-default:80`.
+2. Reads the Route's assigned `apps.` hostname.
+3. Updates the Gateway listener and HTTPRoute hostnames to match it, avoiding an Envoy `404`.
+4. Prints the final HTTPS URL.
 
-## 4. Demo 1 — HTTP status codes
+The command is safe to rerun; **rerun it after every `oc apply -f rhcl-parks-demo.yaml`**, because that file contains the original placeholder hostname.
 
-**200: get park data**
+Get the URL:
 
 ```bash
-curl -i -H 'Host: parks-api.example.test' \
-  -H 'Authorization: APIKEY alice-parks-demo-key' \
-  http://localhost:18080/ws/data/all
+export PARKS_URL="https://$(oc -n rhcl-parks-demo get route parks-api-gateway -o jsonpath='{.spec.host}')"
+echo "$PARKS_URL"
+oc -n rhcl-parks-demo get route parks-api-gateway
 ```
 
-Expected: `200 OK` and JSON containing four national parks.
+If your lab cluster uses an untrusted default router certificate, use `curl -k` **for the lab only**; never disable TLS verification for production.
 
-**400: request missing a required parameter**
+**Check RHCL policy readiness before treating the endpoint as protected:**
 
 ```bash
-curl -i -H 'Host: parks-api.example.test' \
-  -H 'Authorization: APIKEY alice-parks-demo-key' \
-  http://localhost:18080/ws/data/park
+oc -n rhcl-parks-demo describe authpolicy parks-auth
+oc -n rhcl-parks-demo describe ratelimitpolicy parks-rate-limits
 ```
 
-Expected: `400 Bad Request` generated by the backend and forwarded through RHCL.
+Both policies should show `Accepted=True` and `Enforced=True`. If `oc get kuadrant -A` reports no resources, the policy demo will **not** work just because the Route serves traffic.
 
-**401: no API key**
+## 4. Demo HTTP status codes
 
 ```bash
-curl -i -H 'Host: parks-api.example.test' \
-  http://localhost:18080/ws/info/
+# 200 — list parks
+curl -i -H 'Authorization: APIKEY alice-parks-demo-key' "$PARKS_URL/ws/data/all"
+
+# 400 — required name query parameter is missing
+curl -i -H 'Authorization: APIKEY alice-parks-demo-key' "$PARKS_URL/ws/data/park"
+
+# 401 — no API key; requires enforced AuthPolicy
+curl -i "$PARKS_URL/ws/info/"
+
+# 404 — park not found
+curl -i -H 'Authorization: APIKEY alice-parks-demo-key' "$PARKS_URL/ws/data/park?name=Atlantis"
 ```
 
-Expected: unauthorized (normally `401`) enforced by RHCL/Authorino.
+The `400` and `404` are application responses forwarded by the gateway. The `401` is generated by the authentication layer when the policy is enforced.
 
-## 5. Demo 2 — Per-client rate limiting
+## 5. Demo per-client rate limiting (HTTP 429)
 
-| API client | Short-window limit | Sustained limit |
-| --- | ---: | ---: |
-| Alice | 5 requests / 10 seconds | 15 requests / minute |
-| Bob | 2 requests / 10 seconds | 6 requests / minute |
-
-**Run eight requests as Bob:**
+Bob allows **2 requests per 10 seconds** and **6 per minute**. Run eight requests immediately:
 
 ```bash
 for i in {1..8}; do
   curl -s -o /dev/null -w "Request $i: %{http_code}\n" \
-    -H 'Host: parks-api.example.test' \
     -H 'Authorization: APIKEY bob-parks-demo-key' \
-    http://localhost:18080/ws/data/all
+    "$PARKS_URL/ws/data/all"
 done
 ```
 
-On fresh counters, expect **2 × `200`, then 6 × `429`**. Repeat using Alice's API key to show her higher independent allowance. Counters persist during their configured windows, so pause for a minute between clean demonstrations.
+With fresh counters and working policies, expect two `200` responses followed by `429` responses. Alice has separate limits of **5/10s** and **15/min**. Allow at least a minute between repeat demonstrations.
 
-For the minute-by-minute sustained-rate demonstration, follow [the advanced guide](RHCL-Parks-Demo-Guide.md#5-demonstrate-per-client-burst-and-sustained-limits).
+See the [advanced guide](RHCL-Parks-Demo-Guide.md#5-demonstrate-per-client-burst-and-sustained-limits) for an explicit sustained-window test.
 
-## 6. Demo 3 — Latency and throughput
+## 6. Demo latency
 
-Open a third terminal to reach the backend directly:
-
-```bash
-oc -n rhcl-parks-demo port-forward svc/parks-api 18081:8080
-```
-
-If you have `hey` installed, run from the API-test terminal:
+With `hey` installed, benchmark through the same Route:
 
 ```bash
-# Direct backend
-hey -n 1000 -c 10 http://localhost:18081/ws/data/all
-
-# RHCL gateway with authentication and rate limiting
 hey -n 1000 -c 10 \
-  -H 'Host: parks-api.example.test' \
   -H 'Authorization: APIKEY benchmark-parks-demo-key' \
-  http://localhost:18080/ws/data/all
+  "$PARKS_URL/ws/data/all"
 ```
 
-Compare **p50, p95, p99**, requests per second and errors. A separate high-limit *benchmark* identity prevents the example 429 rules from distorting the results. Port-forwarding is fine for a demo but **not** for a customer-grade latency SLA benchmark.
+The benchmark key has a high allowance so that `429` doesn't skew the results. Record requests/sec, p50, p95 and p99.
 
-## 7. Demo 4 — OpenTelemetry tracing
+The Route adds an OpenShift HAProxy ingress hop and TLS termination, so this is **end-to-end Route performance**, not an isolated RHCL overhead measurement. The [advanced guide](RHCL-Parks-Demo-Guide.md#6-demonstrate-latency) explains an optional backend baseline.
 
-RHCL supports OTel request tracing, but a trace backend is **not installed by this repository**. First check what is available:
+## 7. Optional OTel tracing and WAF
 
-```bash
-oc api-resources | grep -Ei 'opentelemetrycollector|tempo|telemetry|istio'
-oc get kuadrant -A
-oc get istio -A
-```
+- **OpenTelemetry:** requires a deployed collector/tracing backend and separately configured supported tracing integration. The base manifest does not deliver end-to-end traces automatically.
+- **WAF:** requires an external product and policy (for example Cloudflare, F5 or AWS WAF). A WAF in front of the Route must also prevent bypass through the automatically created AWS Gateway LoadBalancer.
 
-For a documented full RHCL 1.4 tracing setup, provision Red Hat's distributed tracing stack and use an independently configurable Service Mesh 3.4 gateway. Configure the Istio OTel provider, `Telemetry`, and RHCL tracing endpoints. See [detailed tracing prerequisites](RHCL-Parks-Demo-Guide.md#7-opentelemetry-tracing--required-setup-not-included-in-the-base-manifest).
-
-Do not edit the Istio installation managed internally by OpenShift's `openshift-default` GatewayClass. Red Hat documents a Limitador trace-correlation caveat which should be included in the POC.
-
-## 8. Demo 5 — WAF integration
-
-RHCL is **not a dedicated WAF**. An optional Cloudflare, F5, Akamai, or cloud WAF can sit upstream of an externally exposed RHCL Gateway. The WAF rule, external hostname, TLS setup, and origin protection are vendor/environment-specific and not included here.
-
-Show a request blocked at the WAF, an unauthorized request rejected by RHCL, and a rate-limited request returning `429`. See the [WAF test checklist](RHCL-Parks-Demo-Guide.md#8-waf-integration--external-dependency).
+See the [advanced guide](RHCL-Parks-Demo-Guide.md#7-opentelemetry-tracing--required-setup-not-included-in-the-base-manifest) for the configuration prerequisites and [WAF checks](RHCL-Parks-Demo-Guide.md#8-waf-integration--external-dependency).
 
 ## Troubleshooting
 
 ```bash
-oc -n rhcl-parks-demo describe gateway parks-gw
-oc -n rhcl-parks-demo describe httproute parks-api
+oc -n rhcl-parks-demo get route parks-api-gateway -o yaml
+oc -n rhcl-parks-demo get gateway parks-gw -o yaml
+oc -n rhcl-parks-demo get httproute parks-api -o yaml
 oc -n rhcl-parks-demo describe authpolicy parks-auth
 oc -n rhcl-parks-demo describe ratelimitpolicy parks-rate-limits
-oc -n rhcl-parks-demo logs deployment/parks-api --tail=50
+oc get kuadrant -A
 ```
 
-Common issues: wrong `Host` header causes a gateway `404`; a missing API key results in `401`; missing gateway readiness or backend endpoints may cause `503`; no `429` usually means the rate policy is not yet enforced or the identity mapping is incorrect.
+- **404**: check that Route, Gateway and HTTPRoute hostnames are identical; rerun `bash scripts/expose-route.sh`.
+- **503**: check Gateway `Programmed=True`, Service endpoints and Parks API readiness.
+- **200 without an API key**: RHCL authentication is not enforced; stop the security demo and inspect Kuadrant/Authorino.
+- **No 429**: check `RateLimitPolicy Enforced=True` and identity mapping.
+- **TLS error**: check the router certificate; `curl -k` is an option for this non-production lab.
+- **Route admitted but no access**: verify ingress availability/DNS and `oc -n rhcl-parks-demo describe route parks-api-gateway`.
 
-## Cleanup (optional)
+**Security:** The credentials in the manifest are public example keys. The new Route terminates HTTPS at the OpenShift router but uses HTTP from that router to the Gateway. The Gateway also provisions a separate AWS LoadBalancer. Do not treat this lab as production-secure, and do not expose real data until policies are enforced.
 
-Only when you have finished the lab:
+## Cleanup (when finished)
 
 ```bash
 oc delete namespace rhcl-parks-demo
 ```
 
-Do **not** delete the shared GatewayClass or the cluster's existing Kuadrant instance.
+Do not delete the shared GatewayClass or Kuadrant instance.
 
-## Files in this repository
+## Files
 
-- [`rhcl-parks-demo.yaml`](rhcl-parks-demo.yaml) — namespace, Python API, Service, Gateway, HTTPRoute, API key secrets, AuthPolicy and RateLimitPolicy.
-- [`RHCL-Parks-Demo-Guide.md`](RHCL-Parks-Demo-Guide.md) — extended walkthrough, sustained-window test, tracing, performance and WAF checks.
+- [rhcl-parks-demo.yaml](rhcl-parks-demo.yaml): API, Gateway, HTTPRoute and policies.
+- [scripts/expose-route.sh](scripts/expose-route.sh): create the Route and align hostnames.
+- [RHCL-Parks-Demo-Guide.md](RHCL-Parks-Demo-Guide.md): advanced per-client limit, tracing, performance and WAF guidance.
 
-**Security note:** All three API keys in the manifest are fake demonstration credentials. Never reuse these in production. The lab listener is HTTP-only for easy local testing; production requires TLS and appropriately managed client identities.
+## Official documentation
 
-### References
-
-- [RHCL 1.4 official documentation](https://docs.redhat.com/en/documentation/red_hat_connectivity_link/1.4)
+- [RHCL 1.4 installation](https://docs.redhat.com/en/documentation/red_hat_connectivity_link/1.4/html/install_connectivity_link/rhcl-install-on-ocp)
+- [RHCL 1.4 policy examples](https://docs.redhat.com/en/documentation/red_hat_connectivity_link/1.4/html/deploy_red_hat_connectivity_link/connect-secure-apis-services)
+- [OpenShift 4.22 Routes](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/ingress_and_load_balancing/routes)
 - [OpenShift 4.22 Gateway API](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/ingress_and_load_balancing/configuring-gateway-api)
-- [Original National Parks backend](https://github.com/openshift-roadshow/nationalparks)
