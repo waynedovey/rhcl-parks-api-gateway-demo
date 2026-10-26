@@ -42,8 +42,6 @@ spec:
           # has an untrusted public certificate. Production must secure this
           # back-channel with TLS/mTLS and trust a real CA.
           jwksUrl: http://parks-keycloak.rhcl-parks-demo.svc.cluster.local:8080/realms/parks/protocol/openid-connect/certs
-          audiences:
-            - parks-api
         credentials:
           authorizationHeader:
             prefix: Bearer
@@ -54,6 +52,12 @@ spec:
             - selector: auth.identity.iss
               operator: eq
               value: "__KC_ISSUER__"
+      expected-park-audience:
+        patternMatching:
+          patterns:
+            - selector: auth.identity.aud
+              operator: incl
+              value: parks-api
     response:
       success:
         filters:
