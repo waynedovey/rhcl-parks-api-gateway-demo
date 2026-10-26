@@ -17,7 +17,7 @@ oc get gatewayclass
 oc get authorino,limitador -A
 ```
 
-Important: An installed RHCL Operator CSV is **not** the same as a ready Kuadrant instance. If `oc get kuadrant -A` shows no instance, create one through **Ecosystem → Installed Operators → Red Hat Connectivity Link → Kuadrant → Create Kuadrant** in the namespace where the RHCL Operator is installed (typically `kuadrant-system`). Wait for Authorino and Limitador components to become ready. If the instance already exists, reuse it; do not create a duplicate.
+Important: An installed RHCL Operator CSV is **not** the same as a ready Kuadrant instance. If `oc get kuadrant -A` shows no instance, create one through **Ecosystem → Installed Operators → Red Hat Connectivity Link → Kuadrant → Create Kuadrant** in the namespace where the RHCL Operator is installed (**`openshift-operators` on Wayne's cluster**). Wait for Authorino and Limitador components to become ready. If the instance already exists, reuse it; do not create a duplicate.
 
 If `openshift-default` is missing, a cluster administrator can enable OpenShift's native gateway controller:
 
