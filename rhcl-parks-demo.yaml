@@ -225,6 +225,8 @@ spec:
             selector:
               matchLabels:
                 app: parks-api
+              # Demo keys live outside Kuadrant-system; Authorino must discover them.
+              allNamespaces: true
           credentials:
             authorizationHeader:
               prefix: APIKEY
